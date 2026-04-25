@@ -59,4 +59,7 @@ jobs:
           PYEOF
 
       - name: 블로그 데이터 수집 실행
+        env:
+          NAVER_CLIENT_ID:     ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
         run: python collect.py
