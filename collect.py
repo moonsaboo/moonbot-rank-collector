@@ -320,18 +320,82 @@ def fetch_posts(blog_id: str, challenge_start: datetime = None) -> dict:
 
 
 # ──────────────────────────────────────────────
-# 점수 계산
+# 점수 / 지수 계산
 # ──────────────────────────────────────────────
-def calc_score(p: dict, config: dict) -> float:
+def calc_avg_visitors_7d(visitor_log: dict, start_visitors: int = 0) -> float:
+    """
+    visitorLog에서 최근 7일 평균 방문자 수 계산 (KST 기준).
+    7일 미만이면 기록된 일수로 평균.
+    """
+    today = datetime.now(KST).date()
+    values = []
+    for i in range(7):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        if d in visitor_log:
+            values.append(visitor_log[d])
+    if not values:
+        return float(start_visitors)
+    return round(sum(values) / len(values), 1)
+
+
+def calc_activity_score(p: dict, config: dict) -> float:
+    """
+    ① 활동 점수: 챌린지 랭킹 순위 결정용.
+    (방문자 증가 ÷ wVisitor) + (포스팅 × wPost) + (키워드 증가 × wKeyword)
+    """
     visitor_delta = (p.get("currentVisitors") or 0) - (p.get("startVisitors") or 0)
     keyword_delta = (p.get("currentKeywords") or 0) - (p.get("startKeywords") or 0)
-    post_count = p.get("postCount") or 0
+    post_count    = p.get("postCount") or 0
     score = (
         visitor_delta / 1000 * config.get("wVisitor", 1.0) +
-        post_count * config.get("wPost", 2.0) +
-        keyword_delta * config.get("wKeyword", 0.5)
+        post_count              * config.get("wPost",    2.0) +
+        keyword_delta           * config.get("wKeyword", 0.5)
     )
     return round(max(score, 0), 1)
+
+
+def calc_blog_level_score(avg7d: float, keywords: int) -> float:
+    """
+    ② 블로그 지수 점수 (0~100): 7일 평균 방문자 + 유효키워드 결합.
+    방문자 파트 최대 50점, 키워드 파트 최대 50점.
+    """
+    if avg7d > 5000:   visitor_part = 50
+    elif avg7d > 2000: visitor_part = 40
+    elif avg7d > 500:  visitor_part = 30
+    elif avg7d > 100:  visitor_part = 20
+    elif avg7d > 0:    visitor_part = 10
+    else:              visitor_part = 0
+
+    keyword_part = min(keywords * 5, 50)
+    return round(visitor_part + keyword_part, 1)
+
+
+# 기본 등급 커트라인 (Firestore levelConfig 없을 때 사용)
+DEFAULT_LEVEL_CONFIG = {
+    "일반"  : 0,
+    "준최1" : 21, "준최2": 27, "준최3": 33, "준최4": 39, "준최5": 45,
+    "최적1" : 51, "최적2": 61, "최적3": 71,
+    "고수"  : 81,
+}
+
+
+def score_to_blog_level(score: float, level_config: dict = None) -> dict:
+    """
+    블로그 지수 점수 → 등급 레이블 + 뱃지 스타일.
+    level_config: Firestore에서 읽어온 커트라인 dict.
+    """
+    cfg = level_config or DEFAULT_LEVEL_CONFIG
+    # 커트라인 내림차순으로 정렬 후 첫 번째 해당 등급 반환
+    for label in ["고수", "최적3", "최적2", "최적1",
+                  "준최5", "준최4", "준최3", "준최2", "준최1", "일반"]:
+        if score >= cfg.get(label, DEFAULT_LEVEL_CONFIG.get(label, 0)):
+            return {"label": label, "score": score}
+    return {"label": "일반", "score": score}
+
+
+# 하위 호환용 (기존 코드에서 calc_score 호출 부분)
+def calc_score(p: dict, config: dict) -> float:
+    return calc_activity_score(p, config)
 
 
 
@@ -592,23 +656,41 @@ def run_collection():
         categories     = meta.get("categories", [])
         detected_topic = detect_topic(post_titles, categories)
 
-        # ── 7. Firestore 업데이트 데이터 구성 ─────────────
-        update_data = {
-            "nickname"        : nickname,
-            "profileImg"      : profile_img,
-            "todayVisitors"   : visitors["today"],
-            "currentVisitors" : new_curr,
-            "visitorLog"      : visitor_log,
-            "weekVisitors"    : visitors["week_total"],
-            "postCount"       : posts["challenge_count"],
-            "todayPostCount"  : posts["today_count"],
-            "recentPosts"     : posts["posts"][:10],
-            "currentKeywords" : current_kw,
-            "updatedAt"       : firestore.SERVER_TIMESTAMP,
-        }
+        # ── 7. 점수 계산 (이원화) ─────────────────────────
+        # ① 활동 점수: 챌린지 랭킹 순위 결정
+        merged_tmp = {**p,
+                      "currentVisitors": new_curr,
+                      "currentKeywords": current_kw,
+                      "postCount"      : posts["challenge_count"]}
+        activity_score = calc_activity_score(merged_tmp, score_config)
 
-        merged = {**p, **update_data}
-        update_data["score"] = calc_score(merged, score_config)
+        # ② 블로그 지수 등급: 7일 평균 방문자 + 키워드 기반
+        avg7d          = calc_avg_visitors_7d(visitor_log, start_visitors)
+        blog_lvl_score = calc_blog_level_score(avg7d, current_kw)
+        level_cfg      = score_config.get("levelConfig", {})
+        blog_level     = score_to_blog_level(blog_lvl_score, level_cfg)
+
+        # ── 8. Firestore 업데이트 데이터 구성 ─────────────
+        update_data = {
+            "nickname"           : nickname,
+            "profileImg"         : profile_img,
+            "todayVisitors"      : visitors["today"],
+            "currentVisitors"    : new_curr,
+            "visitorLog"         : visitor_log,
+            "weekVisitors"       : visitors["week_total"],
+            "postCount"          : posts["challenge_count"],
+            "todayPostCount"     : posts["today_count"],
+            "recentPosts"        : posts["posts"][:10],
+            "currentKeywords"    : current_kw,
+            # 활동 점수 (랭킹용)
+            "score"              : activity_score,
+            "totalActivityScore" : activity_score,
+            # 블로그 지수 (등급용)
+            "averageVisitors7D"  : avg7d,
+            "blogLevelScore"     : blog_lvl_score,
+            "currentBlogLevel"   : blog_level["label"],
+            "updatedAt"          : firestore.SERVER_TIMESTAMP,
+        }
 
         # ── 8. blog_cache 저장 (관리자 자동조회용) ─────────
         db.collection("blog_cache").document(blog_id).set({
@@ -626,7 +708,8 @@ def run_collection():
         # ── 9. 참가자 문서 업데이트 ───────────────────────
         participants_ref.document(snap.id).update(update_data)
 
-        print(f"  닉네임={nickname} | 방문자={visitors['today']:,} | 누적={new_curr:,}"
+        print(f"  닉네임={nickname} | 오늘방문자={visitors['today']:,} | 7일평균={avg7d:,.0f}"
+              f" | 키워드={current_kw} | 활동점수={activity_score} | 지수등급={blog_level['label']}({blog_lvl_score}점)"
               f" | 포스팅={posts['challenge_count']} | 키워드={current_kw}"
               f" | 주제={detected_topic} | 점수={update_data['score']}")
         time.sleep(1.5)
