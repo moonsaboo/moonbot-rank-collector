@@ -28,19 +28,17 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Firebase 서비스 계정 키 생성
-        run: |
-          echo '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' > serviceAccountKey.json
-          echo "키 파일 생성 완료 ($(wc -c < serviceAccountKey.json) bytes)"
-
-      - name: 키 파일 유효성 확인
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: |
           python -c "
-          import json
-          with open('serviceAccountKey.json') as f:
-            data = json.load(f)
-          print('프로젝트:', data.get('project_id'))
-          print('클라이언트 이메일:', data.get('client_email','')[:30]+'...')
-          print('키 형식 정상')
+          import os, json
+          key_str = os.environ['FIREBASE_SERVICE_ACCOUNT']
+          data = json.loads(key_str)
+          with open('serviceAccountKey.json', 'w') as f:
+              json.dump(data, f)
+          print('project_id:', data.get('project_id'))
+          print('키 파일 생성 완료')
           "
 
       - name: 블로그 데이터 수집 실행
