@@ -150,7 +150,7 @@ def fetch_posts(blog_id: str, challenge_start: datetime = None) -> dict:
                          headers=HEADERS, timeout=10)
         root = ET.fromstring(r.content)
         channel = root.find("channel")
-        if not channel:
+        if channel is None:
             return result
 
         now_kst = datetime.now(KST)
@@ -316,7 +316,15 @@ def run_collection():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        test_blog(sys.argv[1])
-    else:
-        run_collection()
+    try:
+        if len(sys.argv) > 1:
+            test_blog(sys.argv[1])
+        else:
+            run_collection()
+    except Exception as e:
+        import traceback
+        print("=" * 50)
+        print("[ERROR] 수집 실패:")
+        traceback.print_exc()
+        print("=" * 50)
+        sys.exit(1)
