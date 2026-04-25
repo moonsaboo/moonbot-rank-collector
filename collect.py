@@ -616,7 +616,7 @@ def run_collection():
             "nickname"        : nickname,
             "profileImg"      : profile_img,
             "topic"           : detected_topic,
-            "todayVisitors"   : today_v,
+            "todayVisitors"   : visitors["today"],
             "weekVisitors"    : visitors["week_total"],
             "todayPosts"      : posts["today_count"],
             "currentKeywords" : current_kw,
@@ -626,7 +626,7 @@ def run_collection():
         # ── 9. 참가자 문서 업데이트 ───────────────────────
         participants_ref.document(snap.id).update(update_data)
 
-        print(f"  닉네임={nickname} | 방문자={today_v:,} | 누적={new_curr:,}"
+        print(f"  닉네임={nickname} | 방문자={visitors['today']:,} | 누적={new_curr:,}"
               f" | 포스팅={posts['challenge_count']} | 키워드={current_kw}"
               f" | 주제={detected_topic} | 점수={update_data['score']}")
         time.sleep(1.5)
