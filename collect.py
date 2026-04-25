@@ -20,6 +20,21 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 import os
 import time
+
+# .env 파일 자동 로드 (로컬 개발용)
+# scraper/ 또는 부모 디렉토리의 .env 파일을 탐색
+try:
+    from dotenv import load_dotenv
+    _env_paths = [
+        os.path.join(os.path.dirname(__file__), ".env"),          # scraper/.env
+        os.path.join(os.path.dirname(__file__), "..", ".env"),    # blog-challenge/.env
+    ]
+    for _p in _env_paths:
+        if os.path.exists(_p):
+            load_dotenv(_p)
+            break
+except ImportError:
+    pass  # GitHub Actions 환경 등에서는 dotenv 없이 환경변수 직접 사용
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -444,7 +459,7 @@ def count_valid_keywords(blog_id: str, keywords: list[str]) -> int:
         except Exception as e:
             print(f"  키워드 '{kw}' 조회 실패(skip): {e}")
 
-        time.sleep(0.3)  # rate limit 방지
+        time.sleep(0.2)  # rate limit 방지
 
     print(f"  유효키워드: {valid_count}/{len(keywords)}개 (조회 {checked}건)")
     return valid_count
@@ -460,14 +475,15 @@ def test_blog(blog_id: str):
     nickname = fetch_nickname(blog_id)
     visitors = fetch_visitors(blog_id)
     posts    = fetch_posts(blog_id)
-    tags     = fetch_rss_tags(blog_id)
+    all_tags = fetch_rss_tags(blog_id)
+    tags     = all_tags[:100]
 
     print(f"닉네임      : {nickname}")
     print(f"오늘 방문자 : {visitors['today']:,}명")
     print(f"어제 방문자 : {visitors['yesterday']:,}명")
     print(f"5일 합계    : {visitors['week_total']:,}명")
     print(f"오늘 포스팅 : {posts['today_count']}개")
-    print(f"RSS 태그    : {len(tags)}개 → {tags[:10]}")
+    print(f"RSS 태그    : 전체 {len(all_tags)}개 → 상위 100개 조회")
 
     if NAVER_CLIENT_ID:
         valid = count_valid_keywords(blog_id, tags)
@@ -547,8 +563,8 @@ def run_collection():
             naver_img = meta.get("profileImg", "")
             profile_img = fetch_profile_as_base64(blog_id, rss_img, naver_img) or stored_img
 
-        # ── 5. 유효키워드 수집 ────────────────────────────
-        tags = fetch_rss_tags(blog_id)
+        # ── 5. 유효키워드 수집 (상위 100개 태그만 조회) ──────
+        tags = fetch_rss_tags(blog_id)[:100]
         valid_kw = count_valid_keywords(blog_id, tags)
         # valid_kw == -1 이면 API 미설정 → 기존 값 유지
         current_kw = valid_kw if valid_kw >= 0 else p.get("currentKeywords", 0)
