@@ -1,0 +1,12 @@
+# Firebase 서비스 계정 키 (절대 올리면 안 됨)
+*firebase-adminsdk*.json
+serviceAccountKey.json
+
+# 로그
+collect_log.txt
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
