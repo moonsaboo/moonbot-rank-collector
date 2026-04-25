@@ -286,6 +286,7 @@ def fetch_posts(blog_id: str, challenge_start: datetime = None) -> dict:
 
         for item in channel.findall("item"):
             title = item.findtext("title", "").strip()
+            link  = item.findtext("link", "").strip()
             pub_date_str = item.findtext("pubDate", "").strip()
             if not pub_date_str:
                 continue
@@ -297,7 +298,11 @@ def fetch_posts(blog_id: str, challenge_start: datetime = None) -> dict:
             except Exception:
                 continue
 
-            result["posts"].append({"title": title, "date": pub_dt_kst.strftime("%Y-%m-%d %H:%M")})
+            result["posts"].append({
+                "title": title,
+                "date" : pub_dt_kst.strftime("%Y-%m-%d %H:%M"),
+                "link" : link,
+            })
 
             # 오늘 포스팅
             if pub_date == today_date:
