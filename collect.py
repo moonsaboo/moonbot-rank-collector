@@ -551,10 +551,23 @@ def run_collection():
         nickname = meta["nickname"] if meta["nickname"] != blog_id else p.get("nickname", blog_id)
 
         # ── 2. 방문자 수 ──────────────────────────────────
-        visitors = fetch_visitors(blog_id)
-        today_v  = visitors["today"]
-        prev_curr = p.get("currentVisitors") or p.get("startVisitors") or 0
-        new_curr  = prev_curr + today_v if today_v > 0 else prev_curr
+        # visitorLog: {"2026-05-01": 1200, "2026-05-02": 1500, ...}
+        # 날짜별로 한 번씩만 기록 → 중복 합산 방지
+        visitors   = fetch_visitors(blog_id)
+        today_str  = datetime.now(KST).strftime("%Y-%m-%d")
+        visitor_log = dict(p.get("visitorLog") or {})
+
+        # 오늘 날짜의 방문자 수만 덮어쓰기 (누적 X)
+        if visitors["today"] > 0:
+            visitor_log[today_str] = visitors["today"]
+        # 어제치도 업데이트 (더 정확한 값으로)
+        yesterday_str = (datetime.now(KST) - timedelta(days=1)).strftime("%Y-%m-%d")
+        if visitors["yesterday"] > 0:
+            visitor_log[yesterday_str] = visitors["yesterday"]
+
+        # 챌린지 기간 내 날짜만 합산 → currentVisitors
+        start_visitors = p.get("startVisitors") or 0
+        new_curr = start_visitors + sum(visitor_log.values())
 
         # ── 3. 포스팅 수 (RSS) ────────────────────────────
         posts = fetch_posts(blog_id, challenge_start)
@@ -583,8 +596,9 @@ def run_collection():
         update_data = {
             "nickname"        : nickname,
             "profileImg"      : profile_img,
-            "todayVisitors"   : today_v,
+            "todayVisitors"   : visitors["today"],
             "currentVisitors" : new_curr,
+            "visitorLog"      : visitor_log,
             "weekVisitors"    : visitors["week_total"],
             "postCount"       : posts["challenge_count"],
             "todayPostCount"  : posts["today_count"],
