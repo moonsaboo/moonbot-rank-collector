@@ -2,8 +2,12 @@ name: 문봇 블로그 방문자 수집
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # 2시간마다 실행 (UTC 기준)
-  workflow_dispatch:          # 수동 실행 버튼
+    - cron: '0 */2 * * *'   # 2시간마다 (UTC)
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONIOENCODING: utf-8
 
 jobs:
   collect:
@@ -14,7 +18,7 @@ jobs:
       - name: 코드 체크아웃
         uses: actions/checkout@v4
 
-      - name: Python 설치
+      - name: Python 3.11 설치
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -26,8 +30,21 @@ jobs:
       - name: Firebase 서비스 계정 키 생성
         run: |
           echo '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' > serviceAccountKey.json
+          echo "키 파일 생성 완료 ($(wc -c < serviceAccountKey.json) bytes)"
+
+      - name: 키 파일 유효성 확인
+        run: |
+          python -c "
+          import json
+          with open('serviceAccountKey.json') as f:
+            data = json.load(f)
+          print('프로젝트:', data.get('project_id'))
+          print('클라이언트 이메일:', data.get('client_email','')[:30]+'...')
+          print('키 형식 정상')
+          "
 
       - name: 블로그 데이터 수집 실행
         run: python collect.py
-        env:
-          PYTHONIOENCODING: utf-8
+
+      - name: 수집 완료
+        run: echo "수집 성공!"
