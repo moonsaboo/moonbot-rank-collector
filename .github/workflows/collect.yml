@@ -2,7 +2,7 @@ name: 문봇 블로그 방문자 수집
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # 2시간마다 (UTC)
+    - cron: '0 */2 * * *'
   workflow_dispatch:
 
 env:
@@ -27,22 +27,36 @@ jobs:
       - name: 패키지 설치
         run: pip install -r requirements.txt
 
-      - name: Firebase 서비스 계정 키 생성
+      - name: Firebase 서비스 계정 키 생성 및 검증
         env:
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          SA_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: |
-          python -c "
-          import os, json
-          key_str = os.environ['FIREBASE_SERVICE_ACCOUNT']
-          data = json.loads(key_str)
+          python - << 'PYEOF'
+          import os, json, sys
+
+          key_str = os.environ.get('SA_KEY', '').strip()
+
+          if not key_str:
+              print("ERROR: FIREBASE_SERVICE_ACCOUNT secret이 비어있습니다")
+              sys.exit(1)
+
+          print(f"Secret 길이: {len(key_str)} 글자")
+          print(f"첫 10글자: {repr(key_str[:10])}")
+
+          try:
+              data = json.loads(key_str)
+          except json.JSONDecodeError as e:
+              print(f"ERROR: JSON 파싱 실패 - {e}")
+              print("Secret을 다시 등록해주세요: GitHub Settings > Secrets > FIREBASE_SERVICE_ACCOUNT")
+              sys.exit(1)
+
           with open('serviceAccountKey.json', 'w') as f:
               json.dump(data, f)
-          print('project_id:', data.get('project_id'))
-          print('키 파일 생성 완료')
-          "
+
+          print(f"project_id: {data.get('project_id')}")
+          print(f"client_email: {data.get('client_email','')[:30]}...")
+          print("키 파일 생성 완료")
+          PYEOF
 
       - name: 블로그 데이터 수집 실행
         run: python collect.py
-
-      - name: 수집 완료
-        run: echo "수집 성공!"
