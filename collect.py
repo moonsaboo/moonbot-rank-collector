@@ -370,27 +370,24 @@ def calc_blog_level_score(avg7d: float, keywords: int) -> float:
     return round(visitor_part + keyword_part, 1)
 
 
-# 기본 등급 커트라인 (Firestore levelConfig 없을 때 사용)
+# 등급 체계 B: 씨앗→새싹→성장→활성→파워→전문가
 DEFAULT_LEVEL_CONFIG = {
-    "일반"  : 0,
-    "준최1" : 21, "준최2": 27, "준최3": 33, "준최4": 39, "준최5": 45,
-    "최적1" : 51, "최적2": 61, "최적3": 71,
-    "고수"  : 81,
+    "씨앗"  : 0,
+    "새싹"  : 21,
+    "성장"  : 36,
+    "활성"  : 51,
+    "파워"  : 66,
+    "전문가": 81,
 }
 
 
 def score_to_blog_level(score: float, level_config: dict = None) -> dict:
-    """
-    블로그 지수 점수 → 등급 레이블 + 뱃지 스타일.
-    level_config: Firestore에서 읽어온 커트라인 dict.
-    """
+    """블로그 지수 점수 → 등급 레이블"""
     cfg = level_config or DEFAULT_LEVEL_CONFIG
-    # 커트라인 내림차순으로 정렬 후 첫 번째 해당 등급 반환
-    for label in ["고수", "최적3", "최적2", "최적1",
-                  "준최5", "준최4", "준최3", "준최2", "준최1", "일반"]:
+    for label in ["전문가", "파워", "활성", "성장", "새싹", "씨앗"]:
         if score >= cfg.get(label, DEFAULT_LEVEL_CONFIG.get(label, 0)):
             return {"label": label, "score": score}
-    return {"label": "일반", "score": score}
+    return {"label": "씨앗", "score": score}
 
 
 # 하위 호환용 (기존 코드에서 calc_score 호출 부분)
