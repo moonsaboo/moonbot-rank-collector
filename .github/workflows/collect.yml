@@ -2,7 +2,7 @@ name: 문봇 블로그 방문자 수집
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '0 0,12 * * *'  # KST 기준 오전 9시, 오후 9시
   workflow_dispatch:
 
 env:

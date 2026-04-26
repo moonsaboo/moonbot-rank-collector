@@ -544,7 +544,7 @@ def test_blog(blog_id: str):
     visitors = fetch_visitors(blog_id)
     posts    = fetch_posts(blog_id)
     all_tags = fetch_rss_tags(blog_id)
-    tags     = all_tags[:100]
+    tags     = all_tags[:350]
 
     print(f"닉네임      : {nickname}")
     print(f"오늘 방문자 : {visitors['today']:,}명")
@@ -644,8 +644,8 @@ def run_collection():
             naver_img = meta.get("profileImg", "")
             profile_img = fetch_profile_as_base64(blog_id, rss_img, naver_img) or stored_img
 
-        # ── 5. 유효키워드 수집 (상위 100개 태그만 조회) ──────
-        tags = fetch_rss_tags(blog_id)[:100]
+        # ── 5. 유효키워드 수집 (상위 350개, 30명 이하 기준 12시간 2회 = 21,000건/일)
+        tags = fetch_rss_tags(blog_id)[:350]
         result_kw = count_valid_keywords(blog_id, tags)
         # -1 이면 API 미설정 → 기존 값 유지
         if isinstance(result_kw, tuple):
