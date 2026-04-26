@@ -366,7 +366,7 @@ def calc_blog_level_score(avg7d: float, keywords: int) -> float:
     elif avg7d > 0:    visitor_part = 10
     else:              visitor_part = 0
 
-    keyword_part = min(keywords * 5, 50)
+    keyword_part = min(keywords * 1, 50)
     return round(visitor_part + keyword_part, 1)
 
 
