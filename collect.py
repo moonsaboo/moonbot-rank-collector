@@ -501,7 +501,8 @@ def count_valid_keywords(blog_id: str, keywords: list[str]) -> int:
         "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
     }
     valid_count = 0
-    checked = 0
+    valid_list  = []
+    checked     = 0
 
     for kw in keywords:
         try:
@@ -512,26 +513,27 @@ def count_valid_keywords(blog_id: str, keywords: list[str]) -> int:
                 timeout=8,
             )
             if resp.status_code != 200:
-                time.sleep(0.3)
+                time.sleep(0.2)
                 continue
 
             items = resp.json().get("items", [])
-            # 상위 10개 결과 중 blogId 포함 여부 확인
             for item in items:
-                link        = item.get("link", "")
+                link         = item.get("link", "")
                 blogger_link = item.get("bloggerlink", "")
                 if blog_id.lower() in link.lower() or blog_id.lower() in blogger_link.lower():
                     valid_count += 1
+                    valid_list.append(kw)
                     break
 
             checked += 1
         except Exception as e:
             print(f"  키워드 '{kw}' 조회 실패(skip): {e}")
 
-        time.sleep(0.2)  # rate limit 방지
+        time.sleep(0.2)
 
     print(f"  유효키워드: {valid_count}/{len(keywords)}개 (조회 {checked}건)")
-    return valid_count
+    # (count, list) 튜플 반환
+    return valid_count, valid_list
 
 
 # ──────────────────────────────────────────────
@@ -647,9 +649,14 @@ def run_collection():
 
         # ── 5. 유효키워드 수집 (상위 100개 태그만 조회) ──────
         tags = fetch_rss_tags(blog_id)[:100]
-        valid_kw = count_valid_keywords(blog_id, tags)
-        # valid_kw == -1 이면 API 미설정 → 기존 값 유지
-        current_kw = valid_kw if valid_kw >= 0 else p.get("currentKeywords", 0)
+        result_kw = count_valid_keywords(blog_id, tags)
+        # -1 이면 API 미설정 → 기존 값 유지
+        if isinstance(result_kw, tuple):
+            valid_cnt, valid_list = result_kw
+        else:
+            valid_cnt, valid_list = result_kw, []
+        current_kw   = valid_cnt  if valid_cnt  >= 0 else p.get("currentKeywords", 0)
+        current_kwlist = valid_list if valid_cnt >= 0 else p.get("validKeywordList", [])
 
         # ── 6. 주제 자동 감지 ─────────────────────────────
         post_titles    = [pp["title"] for pp in posts["posts"]]
@@ -682,6 +689,7 @@ def run_collection():
             "todayPostCount"     : posts["today_count"],
             "recentPosts"        : posts["posts"][:10],
             "currentKeywords"    : current_kw,
+            "validKeywordList"   : current_kwlist,
             # 활동 점수 (랭킹용)
             "score"              : activity_score,
             "totalActivityScore" : activity_score,
