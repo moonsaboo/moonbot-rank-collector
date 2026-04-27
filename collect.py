@@ -254,6 +254,22 @@ def fetch_visitors(blog_id: str) -> dict:
 
 
 # ──────────────────────────────────────────────
+# 챌린지 시작 전 7일 평균 방문자 계산
+# ──────────────────────────────────────────────
+def calc_pre_challenge_avg(daily_data: dict, challenge_start: datetime) -> int:
+    """챌린지 시작일 직전 7일(D-1 ~ D-7) 일평균 방문자. 없는 날은 건너뜀."""
+    if not challenge_start or not daily_data:
+        return 0
+    start_date = challenge_start.date() if hasattr(challenge_start, "date") else challenge_start
+    counts = []
+    for i in range(1, 8):
+        d_str = (start_date - timedelta(days=i)).strftime("%Y%m%d")
+        if d_str in daily_data:
+            counts.append(daily_data[d_str])
+    return round(sum(counts) / len(counts)) if counts else 0
+
+
+# ──────────────────────────────────────────────
 # 포스팅 수 수집 (RSS 피드)
 # ──────────────────────────────────────────────
 def fetch_posts(blog_id: str, challenge_start: datetime = None, weekday_only: bool = False) -> dict:
@@ -659,6 +675,12 @@ def run_collection():
             if visitors["yesterday"] > 0:
                 visitor_log[yesterday_str] = visitors["yesterday"]
             start_visitors = p.get("startVisitors") or 0
+            # startVisitors 미설정이면 챌린지 전 7일 평균으로 자동 계산
+            auto_start = start_visitors == 0
+            if auto_start:
+                start_visitors = calc_pre_challenge_avg(visitors["daily"], challenge_start)
+                if start_visitors > 0:
+                    print(f"  startVisitors 자동 설정: {start_visitors:,} (챌린지 전 7일 평균)")
             new_curr = start_visitors + sum(visitor_log.values())
 
             # ── 3. 포스팅 수 (RSS) ────────────────────────────
@@ -718,8 +740,10 @@ def run_collection():
                 "blogLevelScore"     : blog_lvl_score,
                 "currentBlogLevel"   : blog_level["label"],
                 "updatedAt"          : firestore.SERVER_TIMESTAMP,
-                "lastError"          : None,  # 성공 시 초기화
+                "lastError"          : None,
             }
+            if auto_start and start_visitors > 0:
+                update_data["startVisitors"] = start_visitors
             db.collection("blog_cache").document(blog_id).set({
                 "blogId"          : blog_id,
                 "nickname"        : nickname,
