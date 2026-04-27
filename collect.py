@@ -320,17 +320,18 @@ def fetch_posts(blog_id: str, challenge_start: datetime = None, weekday_only: bo
                 "link" : link,
             })
 
-            # 오늘 포스팅
-            if pub_date == today_date:
-                result["today_count"] += 1
+            is_weekend = pub_dt_kst.weekday() >= 5  # 토(5)·일(6)
 
-            # 챌린지 기간 포스팅
+            # 오늘 포스팅 (weekday_only면 주말 제외)
+            if pub_date == today_date:
+                if not (weekday_only and is_weekend):
+                    result["today_count"] += 1
+
+            # 챌린지 기간 포스팅 (weekday_only면 주말 제외)
             if challenge_start:
                 start_date = challenge_start.astimezone(KST).date() if challenge_start.tzinfo else challenge_start.date()
                 if pub_date >= start_date:
-                    if weekday_only and pub_dt_kst.weekday() >= 5:  # 토(5)·일(6) 제외
-                        pass
-                    else:
+                    if not (weekday_only and is_weekend):
                         result["challenge_count"] += 1
 
     except Exception as e:
