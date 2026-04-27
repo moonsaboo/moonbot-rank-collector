@@ -256,7 +256,7 @@ def fetch_visitors(blog_id: str) -> dict:
 # ──────────────────────────────────────────────
 # 포스팅 수 수집 (RSS 피드)
 # ──────────────────────────────────────────────
-def fetch_posts(blog_id: str, challenge_start: datetime = None) -> dict:
+def fetch_posts(blog_id: str, challenge_start: datetime = None, weekday_only: bool = False) -> dict:
     """
     RSS 피드로 포스팅 수 집계
     반환: {
@@ -312,7 +312,10 @@ def fetch_posts(blog_id: str, challenge_start: datetime = None) -> dict:
             if challenge_start:
                 start_date = challenge_start.astimezone(KST).date() if challenge_start.tzinfo else challenge_start.date()
                 if pub_date >= start_date:
-                    result["challenge_count"] += 1
+                    if weekday_only and pub_dt_kst.weekday() >= 5:  # 토(5)·일(6) 제외
+                        pass
+                    else:
+                        result["challenge_count"] += 1
 
     except Exception as e:
         print(f"  RSS 실패: {e}")
@@ -356,17 +359,18 @@ def calc_activity_score(p: dict, config: dict) -> float:
 
 def calc_blog_level_score(avg7d: float, keywords: int) -> float:
     """
-    ② 블로그 지수 점수 (0~100): 7일 평균 방문자 + 유효키워드 결합.
-    방문자 파트 최대 50점, 키워드 파트 최대 50점.
+    ② 블로그 지수 점수 (0~100): 7일 평균 방문자(최대 70점) + 유효키워드(최대 30점).
     """
-    if avg7d > 5000:   visitor_part = 50
-    elif avg7d > 2000: visitor_part = 40
-    elif avg7d > 500:  visitor_part = 30
+    if avg7d > 10000:  visitor_part = 70
+    elif avg7d > 5000: visitor_part = 60
+    elif avg7d > 2000: visitor_part = 50
+    elif avg7d > 1000: visitor_part = 40
+    elif avg7d > 300:  visitor_part = 30
     elif avg7d > 100:  visitor_part = 20
     elif avg7d > 0:    visitor_part = 10
     else:              visitor_part = 0
 
-    keyword_part = min(keywords * 1, 50)
+    keyword_part = min(keywords * 0.5, 30)
     return round(visitor_part + keyword_part, 1)
 
 
@@ -588,10 +592,13 @@ def run_collection():
     # 챌린지 시작일
     ch_doc = db.collection("challenges").document(challenge_id).get()
     challenge_start = None
+    weekday_only = False
     if ch_doc.exists:
-        start_ts = ch_doc.to_dict().get("startDate")
+        ch_data = ch_doc.to_dict()
+        start_ts = ch_data.get("startDate")
         if start_ts:
             challenge_start = start_ts.replace(tzinfo=KST) if hasattr(start_ts, "replace") else start_ts.astimezone(KST)
+        weekday_only = ch_data.get("weekdayOnly", False)
 
     # 점수 설정
     score_doc = db.collection("settings").document("scoreConfig").get()
@@ -599,7 +606,36 @@ def run_collection():
 
     participants_ref = db.collection("challenges").document(challenge_id).collection("participants")
     participants = list(participants_ref.stream())
-    print(f"참가자: {len(participants)}명\n")
+
+    # 단일 블로그 수집 모드 체크 (Firestore 신호 또는 환경변수)
+    single_id = os.environ.get("BLOG_ID", "").strip()
+    if not single_id:
+        sc_doc = db.collection("settings").document("singleCollect").get()
+        if sc_doc.exists:
+            sc = sc_doc.to_dict()
+            req_blog_id = sc.get("blogId", "").strip()
+            req_at_str  = sc.get("requestedAt", "")
+            if req_blog_id and req_at_str:
+                try:
+                    req_at = datetime.fromisoformat(req_at_str)
+                    if req_at.tzinfo is None:
+                        req_at = req_at.replace(tzinfo=KST)
+                    age_sec = (datetime.now(KST) - req_at).total_seconds()
+                    if age_sec < 600:  # 10분 이내 요청만 유효
+                        single_id = req_blog_id
+                except Exception:
+                    pass
+            # 요청 문서 삭제 (1회성)
+            db.collection("settings").document("singleCollect").delete()
+
+    if single_id:
+        participants = [p for p in participants if p.to_dict().get("blogId", "").strip() == single_id]
+        if not participants:
+            print(f"[단일 수집] '{single_id}' 참가자를 찾을 수 없습니다.")
+            return
+        print(f"[단일 수집] {single_id}\n")
+    else:
+        print(f"참가자: {len(participants)}명\n")
 
     for snap in participants:
         p = snap.to_dict()
@@ -608,115 +644,113 @@ def run_collection():
             continue
 
         print(f"수집: {blog_id} ({p.get('nickname', '')})")
+        try:
+            # ── 1. 메타 ──────────────────────────────────────
+            meta     = fetch_blog_meta(blog_id)
+            nickname = meta["nickname"] if meta["nickname"] != blog_id else p.get("nickname", blog_id)
 
-        # ── 1. 메타 (닉네임·카테고리·프로필URL) ──────────────
-        meta     = fetch_blog_meta(blog_id)
-        nickname = meta["nickname"] if meta["nickname"] != blog_id else p.get("nickname", blog_id)
+            # ── 2. 방문자 수 ──────────────────────────────────
+            visitors    = fetch_visitors(blog_id)
+            today_str   = datetime.now(KST).strftime("%Y-%m-%d")
+            visitor_log = dict(p.get("visitorLog") or {})
+            if visitors["today"] > 0:
+                visitor_log[today_str] = visitors["today"]
+            yesterday_str = (datetime.now(KST) - timedelta(days=1)).strftime("%Y-%m-%d")
+            if visitors["yesterday"] > 0:
+                visitor_log[yesterday_str] = visitors["yesterday"]
+            start_visitors = p.get("startVisitors") or 0
+            new_curr = start_visitors + sum(visitor_log.values())
 
-        # ── 2. 방문자 수 ──────────────────────────────────
-        # visitorLog: {"2026-05-01": 1200, "2026-05-02": 1500, ...}
-        # 날짜별로 한 번씩만 기록 → 중복 합산 방지
-        visitors   = fetch_visitors(blog_id)
-        today_str  = datetime.now(KST).strftime("%Y-%m-%d")
-        visitor_log = dict(p.get("visitorLog") or {})
+            # ── 3. 포스팅 수 (RSS) ────────────────────────────
+            posts = fetch_posts(blog_id, challenge_start, weekday_only)
 
-        # 오늘 날짜의 방문자 수만 덮어쓰기 (누적 X)
-        if visitors["today"] > 0:
-            visitor_log[today_str] = visitors["today"]
-        # 어제치도 업데이트 (더 정확한 값으로)
-        yesterday_str = (datetime.now(KST) - timedelta(days=1)).strftime("%Y-%m-%d")
-        if visitors["yesterday"] > 0:
-            visitor_log[yesterday_str] = visitors["yesterday"]
+            # ── 4. 프로필 이미지 ───────────────────────────────
+            stored_img = p.get("profileImg", "")
+            if stored_img and stored_img.startswith("data:"):
+                profile_img = stored_img
+            else:
+                rss_img   = posts.get("rss_img_url", "")
+                naver_img = meta.get("profileImg", "")
+                profile_img = fetch_profile_as_base64(blog_id, rss_img, naver_img) or stored_img
 
-        # 챌린지 기간 내 날짜만 합산 → currentVisitors
-        start_visitors = p.get("startVisitors") or 0
-        new_curr = start_visitors + sum(visitor_log.values())
+            # ── 5. 유효키워드 수집 ────────────────────────────
+            tags = fetch_rss_tags(blog_id)[:350]
+            result_kw = count_valid_keywords(blog_id, tags)
+            if isinstance(result_kw, tuple):
+                valid_cnt, valid_list = result_kw
+            else:
+                valid_cnt, valid_list = result_kw, []
+            current_kw     = valid_cnt  if valid_cnt  >= 0 else p.get("currentKeywords", 0)
+            current_kwlist = valid_list if valid_cnt >= 0 else p.get("validKeywordList", [])
 
-        # ── 3. 포스팅 수 (RSS) ────────────────────────────
-        posts = fetch_posts(blog_id, challenge_start)
+            # ── 6. 주제 자동 감지 ─────────────────────────────
+            post_titles    = [pp["title"] for pp in posts["posts"]]
+            categories     = meta.get("categories", [])
+            detected_topic = detect_topic(post_titles, categories)
 
-        # ── 4. 프로필 이미지 (base64 재사용 또는 새 다운로드) ─
-        stored_img = p.get("profileImg", "")
-        if stored_img and stored_img.startswith("data:"):
-            profile_img = stored_img
-        else:
-            rss_img   = posts.get("rss_img_url", "")
-            naver_img = meta.get("profileImg", "")
-            profile_img = fetch_profile_as_base64(blog_id, rss_img, naver_img) or stored_img
+            # ── 7. 점수 계산 ───────────────────────────────────
+            merged_tmp = {**p,
+                          "currentVisitors": new_curr,
+                          "currentKeywords": current_kw,
+                          "postCount"      : posts["challenge_count"]}
+            activity_score = calc_activity_score(merged_tmp, score_config)
+            avg7d          = calc_avg_visitors_7d(visitor_log, start_visitors)
+            blog_lvl_score = calc_blog_level_score(avg7d, current_kw)
+            level_cfg      = score_config.get("levelConfig", {})
+            blog_level     = score_to_blog_level(blog_lvl_score, level_cfg)
 
-        # ── 5. 유효키워드 수집 (상위 350개, 30명 이하 기준 12시간 2회 = 21,000건/일)
-        tags = fetch_rss_tags(blog_id)[:350]
-        result_kw = count_valid_keywords(blog_id, tags)
-        # -1 이면 API 미설정 → 기존 값 유지
-        if isinstance(result_kw, tuple):
-            valid_cnt, valid_list = result_kw
-        else:
-            valid_cnt, valid_list = result_kw, []
-        current_kw   = valid_cnt  if valid_cnt  >= 0 else p.get("currentKeywords", 0)
-        current_kwlist = valid_list if valid_cnt >= 0 else p.get("validKeywordList", [])
+            # ── 8. Firestore 업데이트 ─────────────────────────
+            update_data = {
+                "nickname"           : nickname,
+                "profileImg"         : profile_img,
+                "todayVisitors"      : visitors["today"],
+                "currentVisitors"    : new_curr,
+                "visitorLog"         : visitor_log,
+                "weekVisitors"       : visitors["week_total"],
+                "postCount"          : posts["challenge_count"],
+                "todayPostCount"     : posts["today_count"],
+                "recentPosts"        : posts["posts"][:10],
+                "currentKeywords"    : current_kw,
+                "validKeywordList"   : current_kwlist,
+                "score"              : activity_score,
+                "totalActivityScore" : activity_score,
+                "averageVisitors7D"  : avg7d,
+                "blogLevelScore"     : blog_lvl_score,
+                "currentBlogLevel"   : blog_level["label"],
+                "updatedAt"          : firestore.SERVER_TIMESTAMP,
+                "lastError"          : None,  # 성공 시 초기화
+            }
+            db.collection("blog_cache").document(blog_id).set({
+                "blogId"          : blog_id,
+                "nickname"        : nickname,
+                "profileImg"      : profile_img,
+                "topic"           : detected_topic,
+                "todayVisitors"   : visitors["today"],
+                "weekVisitors"    : visitors["week_total"],
+                "todayPosts"      : posts["today_count"],
+                "currentKeywords" : current_kw,
+                "fetchedAt"       : datetime.now(KST).isoformat(),
+            }, merge=True)
+            participants_ref.document(snap.id).update(update_data)
 
-        # ── 6. 주제 자동 감지 ─────────────────────────────
-        post_titles    = [pp["title"] for pp in posts["posts"]]
-        categories     = meta.get("categories", [])
-        detected_topic = detect_topic(post_titles, categories)
+            print(f"  ✓ {nickname} | 방문자={visitors['today']:,} | 7일평균={avg7d:,.0f}"
+                  f" | 키워드={current_kw} | 포스팅={posts['challenge_count']} | 점수={activity_score}")
 
-        # ── 7. 점수 계산 (이원화) ─────────────────────────
-        # ① 활동 점수: 챌린지 랭킹 순위 결정
-        merged_tmp = {**p,
-                      "currentVisitors": new_curr,
-                      "currentKeywords": current_kw,
-                      "postCount"      : posts["challenge_count"]}
-        activity_score = calc_activity_score(merged_tmp, score_config)
+        except Exception as e:
+            import traceback
+            err_msg = f"{type(e).__name__}: {e}"
+            print(f"  ✗ [ERROR] {blog_id} 수집 실패 → 다음으로 넘어감")
+            traceback.print_exc()
+            try:
+                participants_ref.document(snap.id).update({
+                    "lastError": {
+                        "message": err_msg,
+                        "at"     : datetime.now(KST).isoformat(),
+                    }
+                })
+            except Exception:
+                pass
 
-        # ② 블로그 지수 등급: 7일 평균 방문자 + 키워드 기반
-        avg7d          = calc_avg_visitors_7d(visitor_log, start_visitors)
-        blog_lvl_score = calc_blog_level_score(avg7d, current_kw)
-        level_cfg      = score_config.get("levelConfig", {})
-        blog_level     = score_to_blog_level(blog_lvl_score, level_cfg)
-
-        # ── 8. Firestore 업데이트 데이터 구성 ─────────────
-        update_data = {
-            "nickname"           : nickname,
-            "profileImg"         : profile_img,
-            "todayVisitors"      : visitors["today"],
-            "currentVisitors"    : new_curr,
-            "visitorLog"         : visitor_log,
-            "weekVisitors"       : visitors["week_total"],
-            "postCount"          : posts["challenge_count"],
-            "todayPostCount"     : posts["today_count"],
-            "recentPosts"        : posts["posts"][:10],
-            "currentKeywords"    : current_kw,
-            "validKeywordList"   : current_kwlist,
-            # 활동 점수 (랭킹용)
-            "score"              : activity_score,
-            "totalActivityScore" : activity_score,
-            # 블로그 지수 (등급용)
-            "averageVisitors7D"  : avg7d,
-            "blogLevelScore"     : blog_lvl_score,
-            "currentBlogLevel"   : blog_level["label"],
-            "updatedAt"          : firestore.SERVER_TIMESTAMP,
-        }
-
-        # ── 8. blog_cache 저장 (관리자 자동조회용) ─────────
-        db.collection("blog_cache").document(blog_id).set({
-            "blogId"          : blog_id,
-            "nickname"        : nickname,
-            "profileImg"      : profile_img,
-            "topic"           : detected_topic,
-            "todayVisitors"   : visitors["today"],
-            "weekVisitors"    : visitors["week_total"],
-            "todayPosts"      : posts["today_count"],
-            "currentKeywords" : current_kw,
-            "fetchedAt"       : datetime.now(KST).isoformat(),
-        }, merge=True)
-
-        # ── 9. 참가자 문서 업데이트 ───────────────────────
-        participants_ref.document(snap.id).update(update_data)
-
-        print(f"  닉네임={nickname} | 오늘방문자={visitors['today']:,} | 7일평균={avg7d:,.0f}"
-              f" | 키워드={current_kw} | 활동점수={activity_score} | 지수등급={blog_level['label']}({blog_lvl_score}점)"
-              f" | 포스팅={posts['challenge_count']} | 키워드={current_kw}"
-              f" | 주제={detected_topic} | 점수={update_data['score']}")
         time.sleep(1.5)
 
     print(f"\n완료: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
