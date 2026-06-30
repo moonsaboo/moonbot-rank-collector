@@ -20,6 +20,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 import os
 import time
+import hmac
+import hashlib
+import base64
 
 # .env 파일 자동 로드 (로컬 개발용)
 # scraper/ 또는 부모 디렉토리의 .env 파일을 탐색
@@ -48,12 +51,18 @@ from firebase_admin import credentials, firestore
 SERVICE_ACCOUNT_KEY = (
     "serviceAccountKey.json"
     if os.path.exists("serviceAccountKey.json")
-    else "moonbotrank-firebase-adminsdk-fbsvc-84d19b29e1.json"
+    else "moonsaboochallenge-firebase-adminsdk-fbsvc-5ce8261153.json"
 )
 
 # 네이버 검색 API 키 (환경변수)
 NAVER_CLIENT_ID     = os.environ.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
+
+# 네이버 검색광고 API 키 (키워드 검색량 조회)
+NAVER_AD_CUSTOMER_ID    = os.environ.get("NAVER_AD_CUSTOMER_ID", "")
+NAVER_AD_ACCESS_LICENSE = os.environ.get("NAVER_AD_ACCESS_LICENSE", "")
+NAVER_AD_SECRET_KEY     = os.environ.get("NAVER_AD_SECRET_KEY", "")
+RUN_KEYWORDS = os.environ.get("RUN_KEYWORDS", "").lower() in ("1", "true", "yes", "y")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -358,62 +367,171 @@ def calc_avg_visitors_7d(visitor_log: dict, start_visitors: int = 0) -> float:
     return round(sum(values) / len(values), 1)
 
 
-def calc_activity_score(p: dict, config: dict) -> float:
+def calc_challenge_week_avg_visitors(visitor_log: dict, challenge_start: datetime) -> float:
     """
-    ① 활동 점수: 챌린지 랭킹 순위 결정용.
-    (방문자 증가 ÷ wVisitor) + (포스팅 × wPost) + (키워드 증가 × wKeyword)
+    Challenge-week average visitor count.
+    Day 1 divides by 1, day 2 by 2, day 7 by 7, and day 8 starts over at 1.
     """
-    visitor_delta = (p.get("currentVisitors") or 0) - (p.get("startVisitors") or 0)
-    keyword_delta = (p.get("currentKeywords") or 0) - (p.get("startKeywords") or 0)
-    post_count    = p.get("postCount") or 0
-    score = (
-        visitor_delta / 1000 * config.get("wVisitor", 1.0) +
-        post_count              * config.get("wPost",    2.0) +
-        keyword_delta           * config.get("wKeyword", 0.5)
-    )
-    return round(max(score, 0), 1)
+    today = datetime.now(KST).date()
+    if not challenge_start:
+        return calc_avg_visitors_7d(visitor_log, 0)
+
+    start_date = challenge_start.astimezone(KST).date() if challenge_start.tzinfo else challenge_start.date()
+    if today < start_date:
+        return 0.0
+
+    elapsed_days = (today - start_date).days
+    week_day_index = elapsed_days % 7
+    period_start = today - timedelta(days=week_day_index)
+    divisor = week_day_index + 1
+
+    total = 0
+    for i in range(divisor):
+        d = (period_start + timedelta(days=i)).strftime("%Y-%m-%d")
+        total += int(visitor_log.get(d, 0) or 0)
+    return round(total / divisor, 1)
 
 
-def calc_blog_level_score(avg7d: float, keywords: int) -> float:
+# ──────────────────────────────────────────────
+# 통합 점수 시스템 v3 (Business Marketer Edition)
+# 활동(40점) + 성장(60점) = 100점 만점
+# ──────────────────────────────────────────────
+
+def calc_daily_post_log(posts_list: list, challenge_start: datetime,
+                        weekday_only: bool) -> dict:
+    """RSS 포스팅 목록 → 챌린지 기간 일별 포스팅 수 {YYYY-MM-DD: count}"""
+    if not challenge_start:
+        return {}
+    start_date = challenge_start.date() if hasattr(challenge_start, "date") else challenge_start
+    log: dict = {}
+    for post in posts_list:
+        try:
+            date_str = post.get("date", "")[:10]
+            d = datetime.fromisoformat(date_str).date()
+            if d < start_date:
+                continue
+            if weekday_only and d.weekday() >= 5:
+                continue
+            log[date_str] = log.get(date_str, 0) + 1
+        except Exception:
+            pass
+    return log
+
+
+def calc_consecutive_days(daily_post_log: dict, challenge_start: datetime,
+                           goal_per_day: int, weekday_only: bool) -> int:
+    """오늘부터 역산해 연속 달성 일수 (일 목표 포스팅 충족 기준)"""
+    if not challenge_start:
+        return 0
+    start_date = challenge_start.date() if hasattr(challenge_start, "date") else challenge_start
+    today = datetime.now(KST).date()
+    count = 0
+    d = today
+    while d >= start_date:
+        if weekday_only and d.weekday() >= 5:
+            d -= timedelta(days=1)
+            continue
+        if daily_post_log.get(d.isoformat(), 0) >= max(goal_per_day, 1):
+            count += 1
+            d -= timedelta(days=1)
+        else:
+            break
+    return count
+
+
+def calc_achieved_days(daily_post_log: dict, challenge_start: datetime,
+                       challenge_end: datetime, goal_per_day: int,
+                       weekday_only: bool) -> float:
+    """챌린지 기간 중 목표 달성 일수.
+    하루 목표를 초과한 포스팅은 1일로 제한하고, 목표 미만은 비율만큼 반영합니다.
     """
-    ② 블로그 지수 점수 (0~100): 7일 평균 방문자(최대 70점) + 유효키워드(최대 30점).
+    if not challenge_start:
+        return 0.0
+    start_date = challenge_start.date() if hasattr(challenge_start, "date") else challenge_start
+    end_date = challenge_end.date() if challenge_end and hasattr(challenge_end, "date") else datetime.now(KST).date()
+    today = datetime.now(KST).date()
+    end_date = min(end_date, today)
+    goal = max(goal_per_day, 1)
+    count = 0.0
+    d = start_date
+    while d <= end_date:
+        if weekday_only and d.weekday() >= 5:
+            d += timedelta(days=1)
+            continue
+        count += min((daily_post_log.get(d.isoformat(), 0) or 0) / goal, 1.0)
+        d += timedelta(days=1)
+    return round(count, 2)
+
+
+def calc_activity_score(achieved_days: float,
+                        consec_days: int, total_days: int) -> float:
+    """활동 점수 (최대 40점)
+    - 날짜별 달성률 30점 + 연속 달성 보너스 10점
+    - 하루 목표를 넘겨 작성해도 해당 날짜는 최대 1일 달성으로만 계산
     """
-    if avg7d > 10000:  visitor_part = 70
-    elif avg7d > 5000: visitor_part = 60
-    elif avg7d > 2000: visitor_part = 50
-    elif avg7d > 1000: visitor_part = 40
-    elif avg7d > 300:  visitor_part = 30
-    elif avg7d > 100:  visitor_part = 20
-    elif avg7d > 0:    visitor_part = 10
-    else:              visitor_part = 0
-
-    keyword_part = min(keywords * 0.5, 30)
-    return round(visitor_part + keyword_part, 1)
+    posting = min(achieved_days / total_days, 1.0) * 30 if total_days > 0 else 0.0
+    consec  = min(consec_days / total_days, 1.0) * 10 if total_days > 0 else 0.0
+    return round(posting + consec, 2)
 
 
-# 등급 체계 B: 씨앗→새싹→성장→활성→파워→전문가
+def calc_growth_score(curr_visitors: int, start_visitors: int,
+                      curr_keywords: int) -> float:
+    """성장 점수 (최대 60점)
+    - 방문자 절대값 30점 + 방문자 성장률 10점 + 키워드 수 20점
+    """
+    # 방문자 절대값 (30점)
+    v = curr_visitors
+    if v >= 10001:  v_abs = 30.0
+    elif v >= 5001: v_abs = 25.0
+    elif v >= 2001: v_abs = 20.0
+    elif v >= 1001: v_abs = 15.0
+    elif v >= 301:  v_abs = 10.0
+    elif v >= 101:  v_abs = 5.0
+    elif v >= 1:    v_abs = 2.0
+    else:           v_abs = 0.0
+
+    # 방문자 성장률 (10점)
+    if start_visitors > 0:
+        v_rate = (curr_visitors - start_visitors) / start_visitors * 100
+    else:
+        v_rate = 100.0 if curr_visitors > 0 else 0.0
+
+    if v_rate >= 100:  v_growth = 10.0
+    elif v_rate >= 50: v_growth = 7.0
+    elif v_rate >= 10: v_growth = 5.0
+    else:              v_growth = 0.0
+
+    # 키워드 수 (20점)
+    k = curr_keywords
+    if k >= 100:  k_score = 20.0
+    elif k >= 50: k_score = 15.0
+    elif k >= 20: k_score = 10.0
+    else:         k_score = 5.0
+
+    return round(v_abs + v_growth + k_score, 2)
+
+
+def calc_integrated_score(activity: float, growth: float) -> float:
+    """통합 점수 = 활동(최대40) + 성장(최대60) = 최대 100점"""
+    return round(min(activity + growth, 100.0), 2)
+
+
 DEFAULT_LEVEL_CONFIG = {
-    "씨앗"  : 0,
-    "새싹"  : 21,
-    "성장"  : 36,
-    "활성"  : 51,
-    "파워"  : 66,
-    "전문가": 81,
+    "루키"    : 0,
+    "플레이어": 21,
+    "러너"    : 36,
+    "프로"    : 51,
+    "리더"    : 66,
+    "마스터"  : 81,
 }
 
 
 def score_to_blog_level(score: float, level_config: dict = None) -> dict:
-    """블로그 지수 점수 → 등급 레이블"""
     cfg = level_config or DEFAULT_LEVEL_CONFIG
-    for label in ["전문가", "파워", "활성", "성장", "새싹", "씨앗"]:
+    for label in ["마스터", "리더", "프로", "러너", "플레이어", "루키"]:
         if score >= cfg.get(label, DEFAULT_LEVEL_CONFIG.get(label, 0)):
             return {"label": label, "score": score}
-    return {"label": "씨앗", "score": score}
-
-
-# 하위 호환용 (기존 코드에서 calc_score 호출 부분)
-def calc_score(p: dict, config: dict) -> float:
-    return calc_activity_score(p, config)
+    return {"label": "루키", "score": score}
 
 
 
@@ -499,6 +617,77 @@ def fetch_rss_tags(blog_id: str) -> list[str]:
     return list(tags)
 
 
+def _parse_search_volume(value) -> int:
+    """검색량 값 파싱 - '< 10' 문자열 포함 처리"""
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        if value.strip() == "< 10":
+            return 5
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return 0
+    return int(value)
+
+
+def fetch_keyword_volumes(keywords: list[str]) -> dict[str, int]:
+    """
+    네이버 검색광고 API로 키워드 월간 검색량(PC+모바일) 조회.
+    반환: {키워드명: 월간검색량} dict
+    """
+    if not (NAVER_AD_CUSTOMER_ID and NAVER_AD_ACCESS_LICENSE and NAVER_AD_SECRET_KEY):
+        return {}
+    if not keywords:
+        return {}
+
+    def _sign(timestamp: str, method: str, uri: str) -> str:
+        message = f"{timestamp}.{method}.{uri}"
+        sig = hmac.new(
+            NAVER_AD_SECRET_KEY.encode("utf-8"),
+            message.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        return base64.b64encode(sig).decode("utf-8")
+
+    def _clean(kw: str) -> str:
+        return kw.replace(" ", "")
+
+    volumes: dict[str, int] = {}
+    uri = "/keywordstool"
+    base_url = "https://api.naver.com"
+
+    for i in range(0, len(keywords), 100):
+        chunk = keywords[i:i + 100]
+        cleaned = [_clean(k) for k in chunk]
+        ts = str(int(time.time() * 1000))
+        try:
+            resp = requests.get(
+                base_url + uri,
+                params={"hintKeywords": ",".join(cleaned), "showDetail": "1"},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Timestamp":  ts,
+                    "X-API-KEY":    NAVER_AD_ACCESS_LICENSE,
+                    "X-Customer":   str(NAVER_AD_CUSTOMER_ID),
+                    "X-Signature":  _sign(ts, "GET", uri),
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                for item in resp.json().get("keywordList", []):
+                    kw  = item.get("relKeyword", "")
+                    vol = (_parse_search_volume(item.get("monthlyPcQcCnt"))
+                           + _parse_search_volume(item.get("monthlyMobileQcCnt")))
+                    volumes[kw] = vol
+            else:
+                print(f"  ⚠ 검색광고 API {resp.status_code}: {resp.text[:120]}")
+        except Exception as e:
+            print(f"  ⚠ 키워드 검색량 조회 실패: {e}")
+
+    return volumes
+
+
 def count_valid_keywords(blog_id: str, keywords: list[str]) -> int:
     """
     키워드 목록 각각을 네이버 블로그 검색 API로 조회해
@@ -535,12 +724,12 @@ def count_valid_keywords(blog_id: str, keywords: list[str]) -> int:
                 continue
 
             items = resp.json().get("items", [])
-            for item in items:
+            for rank_i, item in enumerate(items, start=1):
                 link         = item.get("link", "")
                 blogger_link = item.get("bloggerlink", "")
                 if blog_id.lower() in link.lower() or blog_id.lower() in blogger_link.lower():
                     valid_count += 1
-                    valid_list.append(kw)
+                    valid_list.append({"name": kw, "rank": rank_i, "volume": 0})
                     break
 
             checked += 1
@@ -550,7 +739,16 @@ def count_valid_keywords(blog_id: str, keywords: list[str]) -> int:
         time.sleep(0.2)
 
     print(f"  유효키워드: {valid_count}/{len(keywords)}개 (조회 {checked}건)")
-    # (count, list) 튜플 반환
+
+    # 검색광고 API로 검색량 보강
+    if valid_list:
+        kw_names = [k["name"] for k in valid_list]
+        volumes  = fetch_keyword_volumes(kw_names)
+        if volumes:
+            for k in valid_list:
+                k["volume"] = volumes.get(k["name"], 0)
+            print(f"  검색량 조회 완료: {len(volumes)}개")
+
     return valid_count, valid_list
 
 
@@ -575,8 +773,9 @@ def test_blog(blog_id: str):
     print(f"RSS 태그    : 전체 {len(all_tags)}개 → 상위 100개 조회")
 
     if NAVER_CLIENT_ID:
-        valid = count_valid_keywords(blog_id, tags)
-        print(f"유효키워드  : {valid}개")
+        result = count_valid_keywords(blog_id, tags)
+        valid_cnt = result[0] if isinstance(result, tuple) else result
+        print(f"유효키워드  : {valid_cnt}개")
     else:
         print("유효키워드  : API 키 미설정 (NAVER_CLIENT_ID 환경변수 필요)")
 
@@ -588,45 +787,64 @@ def test_blog(blog_id: str):
 # ──────────────────────────────────────────────
 # 전체 수집 실행
 # ──────────────────────────────────────────────
-def run_collection():
+def run_collection(single_id_override: str | None = None, reverse_order: bool = False, progress_callback=None, challenge_id_override: str | None = None):
     print("=" * 50)
     print("문봇 블로그 데이터 수집")
     print(datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"))
     print("=" * 50)
 
     if not firebase_admin._apps:
-        cred = credentials.Certificate(SERVICE_ACCOUNT_KEY)
-        firebase_admin.initialize_app(cred)
+        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("FIREBASE_PROJECT_ID")
+        cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or (SERVICE_ACCOUNT_KEY if os.path.exists(SERVICE_ACCOUNT_KEY) else "")
+        if cred_path:
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred, {"projectId": project_id} if project_id else None)
+        else:
+            firebase_admin.initialize_app(options={"projectId": project_id} if project_id else None)
     db = firestore.client()
 
-    # 활성 챌린지
-    active_doc = db.collection("settings").document("active").get()
-    if not active_doc.exists:
-        print("활성 챌린지 없음. 관리자 패널에서 챌린지를 먼저 등록하세요.")
-        return
-    challenge_id = active_doc.to_dict().get("challengeId")
+    # 활성 챌린지 (오버라이드 가능)
+    if challenge_id_override:
+        challenge_id = challenge_id_override
+        print(f"[챌린지 오버라이드] {challenge_id}")
+    else:
+        active_doc = db.collection("settings").document("active").get()
+        if not active_doc.exists:
+            print("활성 챌린지 없음. 관리자 패널에서 챌린지를 먼저 등록하세요.")
+            return
+        challenge_id = active_doc.to_dict().get("challengeId")
 
-    # 챌린지 시작일
+    # 챌린지 정보
     ch_doc = db.collection("challenges").document(challenge_id).get()
     challenge_start = None
-    weekday_only = False
+    challenge_end   = None
+    weekday_only    = False
+    goal_per_day    = 1
+    total_days      = 25
     if ch_doc.exists:
-        ch_data = ch_doc.to_dict()
-        start_ts = ch_data.get("startDate")
+        ch_data      = ch_doc.to_dict()
+        start_ts     = ch_data.get("startDate")
+        end_ts       = ch_data.get("endDate")
         if start_ts:
             challenge_start = start_ts.replace(tzinfo=KST) if hasattr(start_ts, "replace") else start_ts.astimezone(KST)
-        weekday_only = ch_data.get("weekdayOnly", False)
-
-    # 점수 설정
-    score_doc = db.collection("settings").document("scoreConfig").get()
-    score_config = score_doc.to_dict() if score_doc.exists else {"wVisitor": 1.0, "wPost": 2.0, "wKeyword": 0.5}
+        if end_ts:
+            challenge_end = end_ts.replace(tzinfo=KST) if hasattr(end_ts, "replace") else end_ts.astimezone(KST)
+        weekday_only        = ch_data.get("weekdayOnly", False)
+        goal_per_day        = int(ch_data.get("goalPostsPerDay", 1) or 1)
+        total_days          = int(ch_data.get("totalDays", 25) or 25)
+        skip_start_visitors = bool(ch_data.get("skipStartVisitors", False))
+    # 점수/등급 설정
+    score_doc    = db.collection("settings").document("scoreConfig").get()
+    score_config = score_doc.to_dict() if score_doc.exists else {}
 
     participants_ref = db.collection("challenges").document(challenge_id).collection("participants")
     participants = list(participants_ref.stream())
+    if reverse_order:
+        participants.reverse()
 
     # 단일 블로그 수집 모드 체크 (Firestore 신호 또는 환경변수)
-    single_id = os.environ.get("BLOG_ID", "").strip()
-    if not single_id:
+    single_id = (single_id_override if single_id_override is not None else os.environ.get("BLOG_ID", "")).strip()
+    if not single_id and single_id_override is None:
         sc_doc = db.collection("settings").document("singleCollect").get()
         if sc_doc.exists:
             sc = sc_doc.to_dict()
@@ -652,13 +870,18 @@ def run_collection():
             return
         print(f"[단일 수집] {single_id}\n")
     else:
-        print(f"참가자: {len(participants)}명\n")
+        direction = "아래에서 위" if reverse_order else "위에서 아래"
+        print(f"참가자: {len(participants)}명 ({direction})\n")
 
-    for snap in participants:
+    total_participants = len(participants)
+    for idx, snap in enumerate(participants, start=1):
         p = snap.to_dict()
         blog_id = p.get("blogId", "").strip()
         if not blog_id:
             continue
+
+        if progress_callback:
+            progress_callback(idx, total_participants, blog_id, p.get("nickname", ""))
 
         print(f"수집: {blog_id} ({p.get('nickname', '')})")
         try:
@@ -676,51 +899,69 @@ def run_collection():
             if visitors["yesterday"] > 0:
                 visitor_log[yesterday_str] = visitors["yesterday"]
             start_visitors = p.get("startVisitors") or 0
-            # startVisitors 미설정이면 챌린지 전 7일 평균으로 자동 계산
-            auto_start = start_visitors == 0
-            if auto_start:
+            auto_start = False
+            if not skip_start_visitors and start_visitors == 0:
+                # startVisitors 미설정이면 챌린지 전 7일 평균으로 자동 계산
+                auto_start = True
                 start_visitors = calc_pre_challenge_avg(visitors["daily"], challenge_start)
                 if start_visitors > 0:
                     print(f"  startVisitors 자동 설정: {start_visitors:,} (챌린지 전 7일 평균)")
-            new_curr = start_visitors + sum(visitor_log.values())
+            new_curr = calc_challenge_week_avg_visitors(visitor_log, challenge_start)
 
             # ── 3. 포스팅 수 (RSS) ────────────────────────────
             posts = fetch_posts(blog_id, challenge_start, weekday_only)
 
-            # ── 4. 프로필 이미지 ───────────────────────────────
-            stored_img = p.get("profileImg", "")
-            if stored_img and stored_img.startswith("data:"):
-                profile_img = stored_img
-            else:
-                rss_img   = posts.get("rss_img_url", "")
-                naver_img = meta.get("profileImg", "")
-                profile_img = fetch_profile_as_base64(blog_id, rss_img, naver_img) or stored_img
+            # ── 4. 프로필 이미지 ─────────────────────────────────
+            # 항상 최신 프로필 수집 (기존 base64 이미지가 있어도 갱신)
+            stored_img  = p.get("profileImg", "")
+            rss_img     = posts.get("rss_img_url", "")
+            naver_img   = meta.get("profileImg", "")
+            profile_img = fetch_profile_as_base64(blog_id, rss_img, naver_img) or stored_img
 
             # ── 5. 유효키워드 수집 ────────────────────────────
-            tags = fetch_rss_tags(blog_id)[:350]
-            result_kw = count_valid_keywords(blog_id, tags)
-            if isinstance(result_kw, tuple):
-                valid_cnt, valid_list = result_kw
+            # 기본 수집에서는 속도를 위해 키워드 검증을 건너뜁니다.
+            # 정밀 진단이 필요할 때만 RUN_KEYWORDS=1 환경변수로 실행하세요.
+            if RUN_KEYWORDS:
+                tags = fetch_rss_tags(blog_id)[:350]
+                result_kw = count_valid_keywords(blog_id, tags)
+                if isinstance(result_kw, tuple):
+                    valid_cnt, valid_list = result_kw
+                else:
+                    valid_cnt, valid_list = result_kw, []
+                current_kw     = valid_cnt  if valid_cnt  >= 0 else p.get("currentKeywords", 0)
+                current_kwlist = valid_list if valid_cnt >= 0 else p.get("validKeywordList", [])
             else:
-                valid_cnt, valid_list = result_kw, []
-            current_kw     = valid_cnt  if valid_cnt  >= 0 else p.get("currentKeywords", 0)
-            current_kwlist = valid_list if valid_cnt >= 0 else p.get("validKeywordList", [])
+                current_kw     = p.get("currentKeywords", 0)
+                current_kwlist = p.get("validKeywordList", [])
 
             # ── 6. 주제 자동 감지 ─────────────────────────────
             post_titles    = [pp["title"] for pp in posts["posts"]]
             categories     = meta.get("categories", [])
             detected_topic = detect_topic(post_titles, categories)
 
-            # ── 7. 점수 계산 ───────────────────────────────────
-            merged_tmp = {**p,
-                          "currentVisitors": new_curr,
-                          "currentKeywords": current_kw,
-                          "postCount"      : posts["challenge_count"]}
-            activity_score = calc_activity_score(merged_tmp, score_config)
-            avg7d          = calc_avg_visitors_7d(visitor_log, start_visitors)
-            blog_lvl_score = calc_blog_level_score(avg7d, current_kw)
-            level_cfg      = score_config.get("levelConfig", {})
-            blog_level     = score_to_blog_level(blog_lvl_score, level_cfg)
+            # ── 7. 통합 점수 계산 (v2) ────────────────────────
+            avg7d          = new_curr
+            # RSS 기반 일별 포스팅 수를 기존 기록과 병합 (수동 수정값 보호: 날짜별 최댓값 유지)
+            new_daily_log      = calc_daily_post_log(posts["posts"], challenge_start, weekday_only)
+            existing_daily_log = dict(p.get("dailyPostLog") or {})
+            all_dates          = set(existing_daily_log) | set(new_daily_log)
+            daily_post_log     = {dt: max(existing_daily_log.get(dt, 0), new_daily_log.get(dt, 0)) for dt in all_dates}
+            consec_days        = calc_consecutive_days(daily_post_log, challenge_start, goal_per_day, weekday_only)
+            achieved_days      = calc_achieved_days(daily_post_log, challenge_start, challenge_end, goal_per_day, weekday_only)
+            progress_rate      = round((achieved_days / total_days) * 100, 1) if total_days > 0 else 0.0
+            act_score  = calc_activity_score(
+                achieved_days = achieved_days,
+                consec_days = consec_days,
+                total_days  = total_days,
+            )
+            grow_score = calc_growth_score(
+                curr_visitors  = new_curr,
+                start_visitors = start_visitors,
+                curr_keywords  = current_kw,
+            )
+            intg_score = calc_integrated_score(act_score, grow_score)
+            level_cfg  = score_config.get("levelConfig", {})
+            blog_level = score_to_blog_level(intg_score, level_cfg)
 
             # ── 8. Firestore 업데이트 ─────────────────────────
             update_data = {
@@ -732,13 +973,23 @@ def run_collection():
                 "weekVisitors"       : visitors["week_total"],
                 "postCount"          : posts["challenge_count"],
                 "todayPostCount"     : posts["today_count"],
-                "recentPosts"        : posts["posts"][:10],
+                "recentPosts"        : [
+                    p for p in posts["posts"]
+                    if (not challenge_start or p["date"][:10] >= challenge_start.strftime("%Y-%m-%d"))
+                    and (not challenge_end   or p["date"][:10] <= challenge_end.strftime("%Y-%m-%d"))
+                ][:50],
                 "currentKeywords"    : current_kw,
                 "validKeywordList"   : current_kwlist,
-                "score"              : activity_score,
-                "totalActivityScore" : activity_score,
+                "dailyPostLog"       : daily_post_log,
+                "consecutiveDays"    : consec_days,
+                "achievedDays"       : achieved_days,
+                "progressRate"       : progress_rate,
+                "score"              : intg_score,
+                "totalScore"         : intg_score,
+                "totalActivityScore" : act_score,
+                "growthScore"        : grow_score,
+                "blogLevelScore"     : intg_score,
                 "averageVisitors7D"  : avg7d,
-                "blogLevelScore"     : blog_lvl_score,
                 "currentBlogLevel"   : blog_level["label"],
                 "updatedAt"          : firestore.SERVER_TIMESTAMP,
                 "lastError"          : None,
@@ -758,8 +1009,9 @@ def run_collection():
             }, merge=True)
             participants_ref.document(snap.id).update(update_data)
 
-            print(f"  ✓ {nickname} | 방문자={visitors['today']:,} | 7일평균={avg7d:,.0f}"
-                  f" | 키워드={current_kw} | 포스팅={posts['challenge_count']} | 점수={activity_score}")
+            print(f"  ✓ {nickname} | 포스팅={posts['challenge_count']}개 | 달성일={achieved_days}/{total_days}일({progress_rate}%) | 연속={consec_days}일"
+                  f" | 7일평균={avg7d:,.0f} | 키워드={current_kw}"
+                  f" | 활동={act_score} 성장={grow_score} 통합={intg_score} | 등급={blog_level['label']}")
 
         except Exception as e:
             import traceback
