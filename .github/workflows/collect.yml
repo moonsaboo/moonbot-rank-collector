@@ -2,7 +2,7 @@ name: 문봇 블로그 방문자 수집
 
 on:
   schedule:
-    - cron: '0 0,12 * * *'  # KST 기준 오전 9시, 오후 9시
+    - cron: '0 0,6,12,18 * * *'  # KST 기준 오전 3시, 9시, 오후 3시, 9시 (하루 4회)
   workflow_dispatch:
 
 env:
@@ -46,6 +46,9 @@ jobs:
 
       - name: 블로그 데이터 수집 실행
         env:
-          NAVER_CLIENT_ID:     ${{ secrets.NAVER_CLIENT_ID }}
-          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          NAVER_CLIENT_ID:         ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET:     ${{ secrets.NAVER_CLIENT_SECRET }}
+          NAVER_AD_CUSTOMER_ID:    ${{ secrets.NAVER_AD_CUSTOMER_ID }}
+          NAVER_AD_ACCESS_LICENSE: ${{ secrets.NAVER_AD_ACCESS_LICENSE }}
+          NAVER_AD_SECRET_KEY:     ${{ secrets.NAVER_AD_SECRET_KEY }}
         run: python collect.py
