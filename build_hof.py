@@ -3,9 +3,9 @@
 챌린지 종료 후 명예의 전당(hall_of_fame) 문서를 생성/갱신하는 스크립트.
 
 기준: 챌린지 100% 완주자 중 방문자 절대 증가량(currentVisitors - startVisitors) 순위.
-완주자는 전원 순위를 매기되, 방문자가 늘지 않은 사람은 마이너스 수치를
-노출하지 않고 "OO일 완주"만 표시한다. 방문자 통계 자체가 없는 완주자만
-순위 없이 "순위 미반영 완주자" 목록에 별도로 담는다.
+완주자는 전원 순위를 매기되, 방문자가 늘지 않았거나 통계 자체가 없는
+사람은 마이너스/숫자를 노출하지 않고 "OO일 완주"만 표시한다.
+챌린지 주최자 계정은 공정성을 위해 명예의 전당 순위에서 항상 제외한다.
 
 사용법:
   python build_hof.py <challengeId>          # Firestore에 저장
@@ -18,6 +18,9 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 from collect import SERVICE_ACCOUNT_KEY
+
+# 챌린지 주최자 계정 - 본인 챌린지의 명예의 전당 순위에는 넣지 않는다
+ORGANIZER_BLOG_IDS = {"newmoon929"}
 
 
 def format_num(n: float) -> str:
@@ -43,23 +46,34 @@ def build_hof(challenge_id: str, dry_run: bool = False):
                     db.collection("challenges").document(challenge_id).collection("participants").stream()]
 
     completers = [p for p in participants if (p.get("progressRate") or 0) >= 99.9]
-    print(f"전체 참가자 {len(participants)}명 중 완주자 {len(completers)}명")
+    organizers = [p for p in completers if p.get("blogId") in ORGANIZER_BLOG_IDS]
+    completers = [p for p in completers if p.get("blogId") not in ORGANIZER_BLOG_IDS]
+    print(f"전체 참가자 {len(participants)}명 중 완주자 {len(completers)}명"
+          + (f" (주최자 {len(organizers)}명 제외)" if organizers else ""))
 
-    # 완주자는 전원 명예의 전당에 표시하되, 방문자가 감소한 사람은
-    # 마이너스 수치를 노출하지 않고 "OO일 완주"만 표시한다.
-    ranked, unranked = [], []
+    # 전원 순위를 매기되, 정렬 우선순위는 [방문자 증가 > 방문자 데이터 있음(비증가) > 데이터 없음] 순.
+    # 증가하지 않았거나 데이터가 없으면 화면에는 수치를 노출하지 않는다.
+    entries = []
     for p in completers:
         has_visitor_data = p.get("visitorDataAvailable", True)
         diff = (p.get("currentVisitors") or 0) - (p.get("startVisitors") or 0)
-        (ranked if has_visitor_data else unranked).append((p, diff))
+        entries.append((p, diff, has_visitor_data))
 
-    ranked.sort(key=lambda x: -x[1])
+    def sort_key(e):
+        _, diff, has_data = e
+        if not has_data:
+            return (-2, 0)
+        return (1 if diff > 0 else 0, diff)
+
+    entries.sort(key=sort_key, reverse=True)
 
     awards = []
-    for i, (p, diff) in enumerate(ranked, start=1):
+    for i, (p, diff, has_visitor_data) in enumerate(entries, start=1):
         emoji = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, "")
         award = "최우수참여자" if i == 1 else "완주자"
-        if diff > 0:
+        if not has_visitor_data:
+            stat = f"{total_days}일 완주 · 방문자 통계 비공개"
+        elif diff > 0:
             stat = (f"{total_days}일 완주 · 방문자 {diff:+.1f}명 "
                     f"({format_num(p.get('startVisitors') or 0)}→{format_num(p.get('currentVisitors') or 0)}명)")
         else:
@@ -70,17 +84,8 @@ def build_hof(challenge_id: str, dry_run: bool = False):
             "profileImg": p.get("profileImg", ""),
         })
 
-    for p, _ in unranked:
-        awards.append({
-            "rank": 0, "emoji": "", "award": "완주자",
-            "stat": f"{total_days}일 완주 · 방문자 통계 비공개",
-            "nickname": p.get("nickname", ""), "blogId": p.get("blogId", ""),
-            "profileImg": p.get("profileImg", ""),
-        })
-
     for a in awards:
-        tag = f"{a['rank']}위" if a["rank"] else "순위미반영"
-        print(f"  [{tag}] {a['nickname']} ({a['blogId']}) - {a['stat']}")
+        print(f"  [{a['rank']}위] {a['nickname']} ({a['blogId']}) - {a['stat']}")
 
     if dry_run:
         print("\n--dry-run: Firestore에 저장하지 않았습니다.")
