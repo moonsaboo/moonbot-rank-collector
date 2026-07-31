@@ -241,11 +241,13 @@ def fetch_nickname(blog_id: str) -> str:
 # 방문자 수 수집 (NVisitorgp4Ajax API)
 # ──────────────────────────────────────────────
 def fetch_visitors(blog_id: str) -> dict:
+    """방문자 통계를 비공개로 설정한 블로그는 API가 빈 응답을 주므로,
+    실패와 '정상적으로 0명'을 구분할 수 있게 ok 플래그를 함께 반환한다."""
     url = f"https://blog.naver.com/NVisitorgp4Ajax.nhn?blogId={blog_id}"
     h = {**HEADERS,
          "Referer": f"https://blog.naver.com/PostList.naver?blogId={blog_id}",
          "X-Requested-With": "XMLHttpRequest"}
-    result = {"today": 0, "yesterday": 0, "week_total": 0, "daily": {}}
+    result = {"today": 0, "yesterday": 0, "week_total": 0, "daily": {}, "ok": True}
     try:
         r = requests.get(url, headers=h, timeout=10)
         root = ET.fromstring(r.text)
@@ -262,6 +264,7 @@ def fetch_visitors(blog_id: str) -> dict:
                 result["yesterday"] = cnt
     except Exception as e:
         print(f"  방문자 실패: {e}")
+        result["ok"] = False
     return result
 
 
@@ -1126,6 +1129,7 @@ def run_collection(single_id_override: str | None = None, reverse_order: bool = 
                 "profileImg"         : profile_img,
                 "todayVisitors"      : visitors["today"],
                 "currentVisitors"    : new_curr,
+                "visitorDataAvailable": visitors.get("ok", True),
                 "visitorLog"         : visitor_log,
                 "weekVisitors"       : visitors["week_total"],
                 "postCount"          : posts["challenge_count"],
