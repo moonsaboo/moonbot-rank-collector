@@ -483,10 +483,13 @@ def calc_avg_visitors_7d(visitor_log: dict, start_visitors: int = 0) -> float:
     return round(sum(values) / len(values), 1)
 
 
-def calc_challenge_week_avg_visitors(visitor_log: dict, challenge_start: datetime) -> float:
+def calc_challenge_week_avg_visitors(visitor_log: dict, challenge_start: datetime,
+                                     weekday_only: bool = False) -> float:
     """
     Challenge-week average visitor count.
     Day 1 divides by 1, day 2 by 2, day 7 by 7, and day 8 starts over at 1.
+    weekday_only=True면 주말을 건너뛰고 평일 5일 단위로 주기가 리셋된다
+    (주말에는 직전 평일까지의 값이 그대로 유지됨).
     """
     today = datetime.now(KST).date()
     if not challenge_start:
@@ -496,16 +499,32 @@ def calc_challenge_week_avg_visitors(visitor_log: dict, challenge_start: datetim
     if today < start_date:
         return 0.0
 
-    elapsed_days = (today - start_date).days
-    week_day_index = elapsed_days % 7
-    period_start = today - timedelta(days=week_day_index)
-    divisor = week_day_index + 1
+    if not weekday_only:
+        elapsed_days = (today - start_date).days
+        week_day_index = elapsed_days % 7
+        period_start = today - timedelta(days=week_day_index)
+        divisor = week_day_index + 1
 
-    total = 0
-    for i in range(divisor):
-        d = (period_start + timedelta(days=i)).strftime("%Y-%m-%d")
-        total += int(visitor_log.get(d, 0) or 0)
-    return round(total / divisor, 1)
+        total = 0
+        for i in range(divisor):
+            d = (period_start + timedelta(days=i)).strftime("%Y-%m-%d")
+            total += int(visitor_log.get(d, 0) or 0)
+        return round(total / divisor, 1)
+
+    # 평일만: start_date~today의 평일 목록을 모아 마지막 5일(주기) 단위로 평균
+    weekdays = []
+    cur = start_date
+    while cur <= today:
+        if cur.weekday() < 5:
+            weekdays.append(cur)
+        cur += timedelta(days=1)
+    if not weekdays:
+        return 0.0
+
+    cycle_len   = (len(weekdays) - 1) % 5 + 1
+    period_days = weekdays[-cycle_len:]
+    total = sum(int(visitor_log.get(d.strftime("%Y-%m-%d"), 0) or 0) for d in period_days)
+    return round(total / cycle_len, 1)
 
 
 # ──────────────────────────────────────────────
@@ -1022,7 +1041,7 @@ def run_collection(single_id_override: str | None = None, reverse_order: bool = 
                 start_visitors = calc_pre_challenge_avg(visitors["daily"], challenge_start)
                 if start_visitors > 0:
                     print(f"  startVisitors 자동 설정: {start_visitors:,} (챌린지 전 7일 평균)")
-            new_curr = calc_challenge_week_avg_visitors(visitor_log, challenge_start)
+            new_curr = calc_challenge_week_avg_visitors(visitor_log, challenge_start, weekday_only)
 
             # ── 3. 포스팅 수 (네이버 글목록 API - RSS 50개 제한 없음) ──
             posts = fetch_posts_full(blog_id, challenge_start, challenge_end, weekday_only)
