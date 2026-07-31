@@ -19,10 +19,13 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8")
 
 import os
+import re
+import json
 import time
 import hmac
 import hashlib
 import base64
+import urllib.parse
 
 # .env 파일 자동 로드 (로컬 개발용)
 # scraper/ 또는 부모 디렉토리의 .env 파일을 탐색
@@ -345,6 +348,119 @@ def fetch_posts(blog_id: str, challenge_start: datetime = None, weekday_only: bo
 
     except Exception as e:
         print(f"  RSS 실패: {e}")
+    return result
+
+
+# ──────────────────────────────────────────────
+# 포스팅 수 수집 (네이버 자체 글목록 API - RSS 50개 제한 없음)
+# ──────────────────────────────────────────────
+def _parse_add_date(s: str, now_kst: datetime):
+    """PostTitleListAsync의 addDate 문자열을 date로 변환.
+    'N시간 전' 같은 상대 표기는 오늘 날짜로 처리한다."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    if "전" in s or s == "방금":
+        return now_kst.date()
+    m = re.match(r"(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.?", s)
+    if m:
+        y, mo, d = map(int, m.groups())
+        return datetime(y, mo, d).date()
+    return None
+
+
+def fetch_posts_full(blog_id: str, challenge_start: datetime = None, challenge_end: datetime = None,
+                      weekday_only: bool = False, max_pages: int = 60) -> dict:
+    """
+    RSS(rss.blog.naver.com)는 최근 50개 글만 반환하므로, 하루 포스팅이 많은 블로그는
+    챌린지 초반 날짜가 며칠 안에 RSS 창 밖으로 밀려나 영구적으로 누락될 수 있다.
+    대신 블로그 자체 글목록 API(PostTitleListAsync)를 챌린지 시작일까지 페이지네이션해
+    전체 발행 이력을 정확히 집계한다.
+    반환 형식은 fetch_posts()와 동일: {today_count, challenge_count, posts}
+    """
+    result = {"today_count": 0, "challenge_count": 0, "posts": []}
+    now_kst    = datetime.now(KST)
+    today_date = now_kst.date()
+    start_date = challenge_start.astimezone(KST).date() if (challenge_start and challenge_start.tzinfo) \
+        else (challenge_start.date() if challenge_start else None)
+    end_date   = challenge_end.astimezone(KST).date() if (challenge_end and challenge_end.tzinfo) \
+        else (challenge_end.date() if challenge_end else today_date)
+
+    seen_lognos = set()
+    day_minute  = {}   # 날짜별로 부여할 분(정렬용 가짜 시각, 큰 값부터 감소)
+    page = 1
+    total_count = None
+
+    while page <= max_pages:
+        try:
+            r = requests.get(
+                "https://blog.naver.com/PostTitleListAsync.naver",
+                params={
+                    "blogId": blog_id, "currentPage": page,
+                    "categoryNo": 0, "parentCategoryNo": "",
+                    "countPerPage": 30,
+                },
+                headers=HEADERS, timeout=10,
+            )
+            # 네이버 응답의 pagingHtml에 JSON 스펙상 무효한 \' 이스케이프가 섞여 있어 정리 후 파싱
+            data = json.loads(r.text.replace("\\'", "'"))
+        except Exception as e:
+            print(f"  글목록 조회 실패(page {page}): {e}")
+            break
+
+        posts = data.get("postList", [])
+        if not posts:
+            break
+        if total_count is None:
+            try:
+                total_count = int(data.get("totalCount", 0))
+            except (TypeError, ValueError):
+                total_count = None
+
+        oldest_on_page = None
+        new_item_seen  = False
+        for item in posts:
+            log_no = item.get("logNo")
+            if not log_no or log_no in seen_lognos:
+                continue
+            seen_lognos.add(log_no)
+            new_item_seen = True
+
+            d = _parse_add_date(item.get("addDate", ""), now_kst)
+            if d is None:
+                continue
+            oldest_on_page = d if oldest_on_page is None or d < oldest_on_page else oldest_on_page
+
+            if start_date and d < start_date:
+                continue
+
+            minute = day_minute.get(d, 59)
+            day_minute[d] = max(minute - 1, 0)
+            title = urllib.parse.unquote(item.get("title", ""))
+
+            result["posts"].append({
+                "title" : title,
+                "date"  : f"{d.isoformat()} 23:{minute:02d}",
+                "link"  : f"https://blog.naver.com/{blog_id}/{log_no}",
+                "logNo" : str(log_no),
+            })
+
+            is_weekend = d.weekday() >= 5
+            if not (weekday_only and is_weekend):
+                if d == today_date:
+                    result["today_count"] += 1
+                if not end_date or d <= end_date:
+                    result["challenge_count"] += 1
+
+        if not new_item_seen:
+            break
+        if total_count is not None and page * 30 >= total_count:
+            break
+        if oldest_on_page and start_date and oldest_on_page <= start_date:
+            break
+        page += 1
+        time.sleep(0.3)
+
     return result
 
 
@@ -908,13 +1024,13 @@ def run_collection(single_id_override: str | None = None, reverse_order: bool = 
                     print(f"  startVisitors 자동 설정: {start_visitors:,} (챌린지 전 7일 평균)")
             new_curr = calc_challenge_week_avg_visitors(visitor_log, challenge_start)
 
-            # ── 3. 포스팅 수 (RSS) ────────────────────────────
-            posts = fetch_posts(blog_id, challenge_start, weekday_only)
+            # ── 3. 포스팅 수 (네이버 글목록 API - RSS 50개 제한 없음) ──
+            posts = fetch_posts_full(blog_id, challenge_start, challenge_end, weekday_only)
 
             # ── 4. 프로필 이미지 ─────────────────────────────────
             # 항상 최신 프로필 수집 (기존 base64 이미지가 있어도 갱신)
             stored_img  = p.get("profileImg", "")
-            rss_img     = posts.get("rss_img_url", "")
+            rss_img     = fetch_posts(blog_id).get("rss_img_url", "")  # 프로필 이미지 후보용 (가벼운 RSS 조회)
             naver_img   = meta.get("profileImg", "")
             profile_img = fetch_profile_as_base64(blog_id, rss_img, naver_img) or stored_img
 
@@ -964,6 +1080,28 @@ def run_collection(single_id_override: str | None = None, reverse_order: bool = 
             blog_level = score_to_blog_level(intg_score, level_cfg)
 
             # ── 8. Firestore 업데이트 ─────────────────────────
+            # RSS는 최근 50개 글만 반환하므로, 챌린지 기간 포스팅이 그 창을 벗어나면
+            # 기존에 저장해둔 recentPosts(링크 포함)를 유지하고 새 항목만 추가 병합한다.
+            new_recent_posts      = [
+                pp for pp in posts["posts"]
+                if (not challenge_start or pp["date"][:10] >= challenge_start.strftime("%Y-%m-%d"))
+                and (not challenge_end   or pp["date"][:10] <= challenge_end.strftime("%Y-%m-%d"))
+            ]
+            def _post_key(rp):
+                # logNo 필드가 없는 과거 저장 항목은 링크에서 숫자 ID를 추출해 대조한다
+                # (RSS 링크 포맷 → 글목록 API 링크 포맷으로 바뀌어도 동일 글로 인식)
+                if rp.get("logNo"):
+                    return str(rp["logNo"])
+                m = re.search(r"/(\d+)(?:\?|$)", rp.get("link", ""))
+                return m.group(1) if m else rp.get("link")
+
+            existing_recent_posts = list(p.get("recentPosts") or [])
+            existing_keys          = {_post_key(rp) for rp in existing_recent_posts}
+            merged_recent_posts    = existing_recent_posts + [
+                rp for rp in new_recent_posts if _post_key(rp) not in existing_keys
+            ]
+            merged_recent_posts.sort(key=lambda rp: rp.get("date", ""), reverse=True)
+
             update_data = {
                 "nickname"           : nickname,
                 "profileImg"         : profile_img,
@@ -973,11 +1111,7 @@ def run_collection(single_id_override: str | None = None, reverse_order: bool = 
                 "weekVisitors"       : visitors["week_total"],
                 "postCount"          : posts["challenge_count"],
                 "todayPostCount"     : posts["today_count"],
-                "recentPosts"        : [
-                    p for p in posts["posts"]
-                    if (not challenge_start or p["date"][:10] >= challenge_start.strftime("%Y-%m-%d"))
-                    and (not challenge_end   or p["date"][:10] <= challenge_end.strftime("%Y-%m-%d"))
-                ][:50],
+                "recentPosts"        : merged_recent_posts,
                 "currentKeywords"    : current_kw,
                 "validKeywordList"   : current_kwlist,
                 "dailyPostLog"       : daily_post_log,
