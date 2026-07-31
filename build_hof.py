@@ -44,13 +44,22 @@ def build_hof(challenge_id: str, dry_run: bool = False):
     completers = [p for p in participants if (p.get("progressRate") or 0) >= 99.9]
     print(f"전체 참가자 {len(participants)}명 중 완주자 {len(completers)}명")
 
-    ranked, unranked = [], []
+    # 방문자가 감소한 완주자는 명예의 전당에 표시하지 않는다 (증가한 사람만 순위에 노출)
+    ranked, unranked, excluded = [], [], []
     for p in completers:
         has_visitor_data = p.get("visitorDataAvailable", True)
         diff = (p.get("currentVisitors") or 0) - (p.get("startVisitors") or 0)
-        (ranked if has_visitor_data else unranked).append((p, diff))
+        if not has_visitor_data:
+            unranked.append((p, diff))
+        elif diff > 0:
+            ranked.append((p, diff))
+        else:
+            excluded.append((p, diff))
 
     ranked.sort(key=lambda x: -x[1])
+    if excluded:
+        print(f"방문자 감소로 제외됨: {len(excluded)}명 - " +
+              ", ".join(f"{p.get('nickname')}({diff:+.1f})" for p, diff in excluded))
 
     awards = []
     for i, (p, diff) in enumerate(ranked, start=1):
