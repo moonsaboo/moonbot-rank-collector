@@ -269,16 +269,23 @@ def fetch_visitors(blog_id: str) -> dict:
 
 
 # ──────────────────────────────────────────────
-# 챌린지 시작 전 7일 평균 방문자 계산
+# 챌린지 시작 전 5일 평균 방문자 계산
+# (네이버 NVisitorgp4Ajax API가 최근 5일치만 제공하므로 5일 기준)
 # ──────────────────────────────────────────────
-def calc_pre_challenge_avg(daily_data: dict, challenge_start: datetime) -> int:
-    """챌린지 시작일 직전 7일(D-1 ~ D-7) 일평균 방문자. 없는 날은 건너뜀."""
+def calc_pre_challenge_avg(daily_data: dict, challenge_start: datetime,
+                            weekday_only: bool = False) -> int:
+    """챌린지 시작일 직전 5일(D-1 ~ D-5) 일평균 방문자.
+    weekday_only=True(평일만 챌린지)면 그 중 주말(토·일)은 제외하고 평일만 평균.
+    없는 날은 건너뜀."""
     if not challenge_start or not daily_data:
         return 0
     start_date = challenge_start.date() if hasattr(challenge_start, "date") else challenge_start
     counts = []
-    for i in range(1, 8):
-        d_str = (start_date - timedelta(days=i)).strftime("%Y%m%d")
+    for i in range(1, 6):
+        d = start_date - timedelta(days=i)
+        if weekday_only and d.weekday() >= 5:
+            continue
+        d_str = d.strftime("%Y%m%d")
         if d_str in daily_data:
             counts.append(daily_data[d_str])
     return round(sum(counts) / len(counts)) if counts else 0
@@ -359,11 +366,24 @@ def fetch_posts(blog_id: str, challenge_start: datetime = None, weekday_only: bo
 # ──────────────────────────────────────────────
 def _parse_add_date(s: str, now_kst: datetime):
     """PostTitleListAsync의 addDate 문자열을 date로 변환.
-    'N시간 전' 같은 상대 표기는 오늘 날짜로 처리한다."""
+    네이버는 발행 후 24시간 이내인 글을 'N분 전'/'N시간 전' 같은 상대 표기로 보여준다.
+    24시간 이내라도 자정을 넘겼으면 실제로는 전날 글일 수 있으므로,
+    now_kst에서 경과 시간을 빼서 실제 날짜를 계산한다(무조건 '오늘'로 찍지 않음)."""
     s = (s or "").strip()
     if not s:
         return None
-    if "전" in s or s == "방금":
+    if s == "방금":
+        return now_kst.date()
+    m = re.match(r"(\d+)\s*분\s*전", s)
+    if m:
+        return (now_kst - timedelta(minutes=int(m.group(1)))).date()
+    m = re.match(r"(\d+)\s*시간\s*전", s)
+    if m:
+        return (now_kst - timedelta(hours=int(m.group(1)))).date()
+    m = re.match(r"(\d+)\s*일\s*전", s)
+    if m:
+        return (now_kst - timedelta(days=int(m.group(1)))).date()
+    if "전" in s:
         return now_kst.date()
     m = re.match(r"(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.?", s)
     if m:
@@ -1039,11 +1059,13 @@ def run_collection(single_id_override: str | None = None, reverse_order: bool = 
             start_visitors = p.get("startVisitors") or 0
             auto_start = False
             if not skip_start_visitors and start_visitors == 0:
-                # startVisitors 미설정이면 챌린지 전 7일 평균으로 자동 계산
+                # startVisitors 미설정이면 챌린지 전 5일 평균으로 자동 계산
+                # (weekdayOnly 챌린지는 그 중 평일만 평균)
                 auto_start = True
-                start_visitors = calc_pre_challenge_avg(visitors["daily"], challenge_start)
+                start_visitors = calc_pre_challenge_avg(visitors["daily"], challenge_start, weekday_only)
                 if start_visitors > 0:
-                    print(f"  startVisitors 자동 설정: {start_visitors:,} (챌린지 전 7일 평균)")
+                    period_label = "챌린지 전 평일 평균" if weekday_only else "챌린지 전 5일 평균"
+                    print(f"  startVisitors 자동 설정: {start_visitors:,} ({period_label})")
             new_curr = calc_challenge_week_avg_visitors(visitor_log, challenge_start, weekday_only)
 
             # ── 3. 포스팅 수 (네이버 글목록 API - RSS 50개 제한 없음) ──
