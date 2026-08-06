@@ -376,10 +376,13 @@ def _parse_add_date(s: str, now_kst: datetime):
         return now_kst.date()
     m = re.match(r"(\d+)\s*분\s*전", s)
     if m:
-        return (now_kst - timedelta(minutes=int(m.group(1)))).date()
+        # 네이버 표기는 내림(floor)이라 실제 경과는 [N,N+1)분 사이.
+        # N만 빼면 자정 직전에 쓴 글이 수집 시점(자정 직후) 기준으로
+        # '오늘' 글로 잘못 분류될 수 있어, 구간 상한(N분 59초)으로 계산한다.
+        return (now_kst - timedelta(minutes=int(m.group(1)), seconds=59)).date()
     m = re.match(r"(\d+)\s*시간\s*전", s)
     if m:
-        return (now_kst - timedelta(hours=int(m.group(1)))).date()
+        return (now_kst - timedelta(hours=int(m.group(1)), minutes=59, seconds=59)).date()
     m = re.match(r"(\d+)\s*일\s*전", s)
     if m:
         return (now_kst - timedelta(days=int(m.group(1)))).date()
