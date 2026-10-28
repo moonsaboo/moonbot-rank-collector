@@ -6,3 +6,5 @@ lxml>=4.9.0
 grpcio>=1.60.0
 google-cloud-firestore>=2.14.0
 google-cloud-storage>=2.0.0
+flask>=3.0.0
+gunicorn>=21.2.0

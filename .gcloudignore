@@ -1,0 +1,13 @@
+.git
+.github
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.env.*
+serviceAccountKey.json
+*firebase-adminsdk*.json
+*.log
+collect_log.txt

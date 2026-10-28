@@ -67,6 +67,16 @@ NAVER_AD_ACCESS_LICENSE = os.environ.get("NAVER_AD_ACCESS_LICENSE", "")
 NAVER_AD_SECRET_KEY     = os.environ.get("NAVER_AD_SECRET_KEY", "")
 RUN_KEYWORDS = os.environ.get("RUN_KEYWORDS", "").lower() in ("1", "true", "yes", "y")
 
+# 노카운트(제외) 날짜: 챌린지 문서의 excludedDates(YYYY-MM-DD). 공휴일 등 포스팅 일수에서 뺄 날.
+# run_collection()이 챌린지마다 채운다.
+EXCLUDED_DATES: set = set()
+
+
+def _is_off_day(d, weekday_only: bool) -> bool:
+    """포스팅 일수에서 제외되는 날인지 (평일만 챌린지의 주말 또는 excludedDates)."""
+    return (weekday_only and d.weekday() >= 5) or d.isoformat() in EXCLUDED_DATES
+
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept-Language": "ko-KR,ko;q=0.9",
@@ -342,18 +352,18 @@ def fetch_posts(blog_id: str, challenge_start: datetime = None, weekday_only: bo
                 "link" : link,
             })
 
-            is_weekend = pub_dt_kst.weekday() >= 5  # 토(5)·일(6)
+            is_off = _is_off_day(pub_date, weekday_only)  # 주말(평일만 챌린지) 또는 노카운트 날짜
 
-            # 오늘 포스팅 (weekday_only면 주말 제외)
+            # 오늘 포스팅 (제외일이면 카운트 안 함)
             if pub_date == today_date:
-                if not (weekday_only and is_weekend):
+                if not is_off:
                     result["today_count"] += 1
 
             # 챌린지 기간 포스팅 (weekday_only면 주말 제외)
             if challenge_start:
                 start_date = challenge_start.astimezone(KST).date() if challenge_start.tzinfo else challenge_start.date()
                 if pub_date >= start_date:
-                    if not (weekday_only and is_weekend):
+                    if not is_off:
                         result["challenge_count"] += 1
 
     except Exception as e:
@@ -471,8 +481,7 @@ def fetch_posts_full(blog_id: str, challenge_start: datetime = None, challenge_e
                 "logNo" : str(log_no),
             })
 
-            is_weekend = d.weekday() >= 5
-            if not (weekday_only and is_weekend):
+            if not _is_off_day(d, weekday_only):
                 if d == today_date:
                     result["today_count"] += 1
                 if not end_date or d <= end_date:
@@ -571,7 +580,7 @@ def calc_daily_post_log(posts_list: list, challenge_start: datetime,
             d = datetime.fromisoformat(date_str).date()
             if d < start_date:
                 continue
-            if weekday_only and d.weekday() >= 5:
+            if _is_off_day(d, weekday_only):
                 continue
             log[date_str] = log.get(date_str, 0) + 1
         except Exception:
@@ -589,7 +598,7 @@ def calc_consecutive_days(daily_post_log: dict, challenge_start: datetime,
     count = 0
     d = today
     while d >= start_date:
-        if weekday_only and d.weekday() >= 5:
+        if _is_off_day(d, weekday_only):
             d -= timedelta(days=1)
             continue
         if daily_post_log.get(d.isoformat(), 0) >= max(goal_per_day, 1):
@@ -616,7 +625,7 @@ def calc_achieved_days(daily_post_log: dict, challenge_start: datetime,
     count = 0.0
     d = start_date
     while d <= end_date:
-        if weekday_only and d.weekday() >= 5:
+        if _is_off_day(d, weekday_only):
             d += timedelta(days=1)
             continue
         count += min((daily_post_log.get(d.isoformat(), 0) or 0) / goal, 1.0)
@@ -994,6 +1003,8 @@ def run_collection(single_id_override: str | None = None, reverse_order: bool = 
         goal_per_day        = int(ch_data.get("goalPostsPerDay", 1) or 1)
         total_days          = int(ch_data.get("totalDays", 25) or 25)
         skip_start_visitors = bool(ch_data.get("skipStartVisitors", False))
+        EXCLUDED_DATES.clear()
+        EXCLUDED_DATES.update(str(x)[:10] for x in (ch_data.get("excludedDates") or []))
     # 점수/등급 설정
     score_doc    = db.collection("settings").document("scoreConfig").get()
     score_config = score_doc.to_dict() if score_doc.exists else {}
