@@ -10,6 +10,9 @@
 사용법:
   python build_hof.py <challengeId>          # Firestore에 저장
   python build_hof.py <challengeId> --dry-run  # 저장 없이 결과만 출력
+  python build_hof.py <challengeId> --days=2026-10-21,2026-10-22,2026-10-23,2026-10-26,2026-10-27
+      # "현재 방문자"를 저장된 값 대신 지정한 날짜들의 visitorLog 평균으로 계산
+      # (챌린지 종료 후 수집으로 currentVisitors가 바뀐 경우 마지막 주 기준으로 고정할 때 사용)
 """
 import sys
 sys.stdout.reconfigure(encoding="utf-8")
@@ -27,7 +30,7 @@ def format_num(n: float) -> str:
     return str(int(n)) if float(n).is_integer() else f"{n:.1f}"
 
 
-def build_hof(challenge_id: str, dry_run: bool = False):
+def build_hof(challenge_id: str, dry_run: bool = False, days: list | None = None):
     if not firebase_admin._apps:
         cred = credentials.Certificate(SERVICE_ACCOUNT_KEY)
         firebase_admin.initialize_app(cred)
@@ -56,6 +59,14 @@ def build_hof(challenge_id: str, dry_run: bool = False):
     entries = []
     for p in completers:
         has_visitor_data = p.get("visitorDataAvailable", True)
+        if days:
+            # 지정한 날짜들의 방문자 기록 평균을 "현재"로 사용 (기록 없는 날은 건너뜀)
+            vlog = p.get("visitorLog") or {}
+            vals = [vlog[d] for d in days if d in vlog]
+            if vals:
+                p["currentVisitors"] = round(sum(vals) / len(vals), 1)
+            else:
+                has_visitor_data = False
         diff = (p.get("currentVisitors") or 0) - (p.get("startVisitors") or 0)
         entries.append((p, diff, has_visitor_data))
 
@@ -105,4 +116,6 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("사용법: python build_hof.py <challengeId> [--dry-run]")
         sys.exit(1)
-    build_hof(sys.argv[1], dry_run="--dry-run" in sys.argv)
+    days_arg = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--days=")), "")
+    days = [d.strip() for d in days_arg.split(",") if d.strip()]
+    build_hof(sys.argv[1], dry_run="--dry-run" in sys.argv, days=days or None)

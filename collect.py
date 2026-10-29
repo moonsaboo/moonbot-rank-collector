@@ -519,7 +519,8 @@ def calc_avg_visitors_7d(visitor_log: dict, start_visitors: int = 0) -> float:
 
 
 def calc_challenge_week_avg_visitors(visitor_log: dict, challenge_start: datetime,
-                                     weekday_only: bool = False) -> float:
+                                     weekday_only: bool = False,
+                                     challenge_end: datetime = None) -> float:
     """
     Challenge-week average visitor count.
     Day 1 divides by 1, day 2 by 2, day 7 by 7, and day 8 starts over at 1.
@@ -527,6 +528,9 @@ def calc_challenge_week_avg_visitors(visitor_log: dict, challenge_start: datetim
     (주말에는 직전 평일까지의 값이 그대로 유지됨).
     """
     today = datetime.now(KST).date()
+    # 챌린지 종료일이 지나면 종료일 기준으로 고정 (종료 후 수집해도 값이 바뀌지 않음)
+    if challenge_end:
+        today = min(today, challenge_end.astimezone(KST).date() if challenge_end.tzinfo else challenge_end.date())
     if not challenge_start:
         return calc_avg_visitors_7d(visitor_log, 0)
 
@@ -589,12 +593,16 @@ def calc_daily_post_log(posts_list: list, challenge_start: datetime,
 
 
 def calc_consecutive_days(daily_post_log: dict, challenge_start: datetime,
-                           goal_per_day: int, weekday_only: bool) -> int:
+                           goal_per_day: int, weekday_only: bool,
+                           challenge_end: datetime = None) -> int:
     """오늘부터 역산해 연속 달성 일수 (일 목표 포스팅 충족 기준)"""
     if not challenge_start:
         return 0
     start_date = challenge_start.date() if hasattr(challenge_start, "date") else challenge_start
     today = datetime.now(KST).date()
+    # 챌린지 종료일이 지나면 종료일부터 역산 (종료 후에도 연속 달성 일수가 바뀌지 않음)
+    if challenge_end:
+        today = min(today, challenge_end.date() if hasattr(challenge_end, "date") else challenge_end)
     count = 0
     d = today
     while d >= start_date:
@@ -1080,7 +1088,7 @@ def run_collection(single_id_override: str | None = None, reverse_order: bool = 
                 if start_visitors > 0:
                     period_label = "챌린지 전 평일 평균" if weekday_only else "챌린지 전 5일 평균"
                     print(f"  startVisitors 자동 설정: {start_visitors:,} ({period_label})")
-            new_curr = calc_challenge_week_avg_visitors(visitor_log, challenge_start, weekday_only)
+            new_curr = calc_challenge_week_avg_visitors(visitor_log, challenge_start, weekday_only, challenge_end)
 
             # ── 3. 포스팅 수 (네이버 글목록 API - RSS 50개 제한 없음) ──
             posts = fetch_posts_full(blog_id, challenge_start, challenge_end, weekday_only)
@@ -1120,7 +1128,7 @@ def run_collection(single_id_override: str | None = None, reverse_order: bool = 
             existing_daily_log = dict(p.get("dailyPostLog") or {})
             all_dates          = set(existing_daily_log) | set(new_daily_log)
             daily_post_log     = {dt: max(existing_daily_log.get(dt, 0), new_daily_log.get(dt, 0)) for dt in all_dates}
-            consec_days        = calc_consecutive_days(daily_post_log, challenge_start, goal_per_day, weekday_only)
+            consec_days        = calc_consecutive_days(daily_post_log, challenge_start, goal_per_day, weekday_only, challenge_end)
             achieved_days      = calc_achieved_days(daily_post_log, challenge_start, challenge_end, goal_per_day, weekday_only)
             progress_rate      = round((achieved_days / total_days) * 100, 1) if total_days > 0 else 0.0
             act_score  = calc_activity_score(
